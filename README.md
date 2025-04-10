@@ -126,21 +126,29 @@ print("CSV saved as k8_books_40.csv")
 
 # Connect SQL Instance to your bucket and get your csv file
 1. Open CloudShell Terminal
-2. Run the following code in chunks
+
+1. start CloudProxy
 ```
-#1 start CloudProxy
 ./cloud-sql-proxy [PROJECT_ID]:[REGION}:[INSTANCE-NAME] -p 5433
+```
 
-#2 connect to PostgreSQL
+2. connect to PostgreSQL
+```
 psql -h 127.0.0.1 -U postgres -p 5433
+```
 
-#3 create a new database
+3. create a new database
+```
 CREATE DATABASE book_recommendations_db;
+```
 
-#4 connect to the database
+4. connect to the database
+```
 \c book_recommendations_db
+```
 
-#5 create a table. You may need to do this line by line. Type each line and hit enter. When finished, close the parentheses (see below) and hit enter.
+5. create a table. You may need to do this line by line. Type each line and hit enter. When finished, close the parentheses (see below) and hit enter.
+```
 CREATE TABLE books (
     id SERIAL PRIMARY KEY,
     title VARCHAR(255),
@@ -166,43 +174,178 @@ CREATE TABLE books (
     embeddable BOOLEAN,
     grade VARCHAR(10)
 );
+```
 
-
-#6 verify table creation
+6. verify table creation
+```
 \dt
+```
 
-#7  import data from bucket to sql
+7.  import data from bucket to sql
+```
 gcloud sql import csv your-instance-name gs://your-bucket-name/k8_books_40.csv \
   --database=your-database-name \
   --table=books
+```
 
-#8 create a directory
+8. create a directory
+```
 sudo mkdir /cloudsql
 sudo chown $USER /cloudsql
+```
 
-#9 re-run proxy
+9. re-run proxy
+```
 ./cloud-sql-proxy \
   --unix-socket /cloudsql \
   [PROJECT_ID]:[REGION}:[INSTANCE-NAME]
+```
 
-#10 reconnect to database (may new tab or terminal)
+10. reconnect to database (may new tab or terminal)
+```
 psql -h /cloudsql/[PROJECT_ID]:[REGION}:[INSTANCE-NAME] \
      -U postgres -d book_recommendations_db
+```
 
-#11 copy csv and include headers; single line of code
+11. copy csv and include headers; single line of code
+```
 \copy books(title,authors,publisher,published_date,description,isbn_10,isbn_13,reading_mode_text,reading_mode_image,page_count,categories,maturity_rating,image_small,image_large,language,sale_country,list_price_amount,list_price_currency,buy_link,web_reader_link,embeddable,grade) FROM 'k8_books_40.csv' WITH CSV HEADER;
-
 ```
 
 # Create Backend API
 1. Open Cloudshell terminal
+
+2. create a folder and change to that directory
 ```
-#1 create a folder and change to that directory
-   mkdir book-api && cd book-api
+mkdir book-api && cd book-api
+```
 
- #2
-   
+3. create a virtual environment
+```
+python3 -m venv venv
+source venv/bin/activate
+```
 
+4. install dependencies
+```
+pip install flask psycopg2-binary flask_sqlalchemy python-dotenv fastapi uvicorn
+```
+
+5. create a .env file for your db
+```
+DB_USER=postgres
+DB_PASSWORD=your_db_password (this is the password from when you made your private connection on your instance)
+DB_NAME=book_recommendations_db
+DB_HOST=127.0.0.1
+```
+
+6. check the variables are set, this should return the info you just entered in the last step
+```
+echo $DB_NAME
+echo $DB_USER
+echo $DB_PASSWORD
+echo $DB_HOST
+```
+
+7. click "Editor" button, navigate to books-api and create a new file named app.py
+```
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import psycopg2
+import os
+from typing import List
+from typing import List, Optional
+
+app = FastAPI()
+
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+
+# Removed maturity_rating
+class Book(BaseModel):
+    title: Optional[str]
+    authors: Optional[str]
+    publisher: Optional[str]
+    published_date: Optional[str]
+    description: Optional[str]
+    isbn_10: Optional[str]
+    isbn_13: Optional[str]
+    reading_mode_text: Optional[bool]
+    reading_mode_image: Optional[bool]
+    page_count: Optional[int]
+    categories: Optional[str]
+    image_small: Optional[str]
+    image_large: Optional[str]
+    language: Optional[str]
+    sale_country: Optional[str]
+    list_price_amount: Optional[float]
+    list_price_currency: Optional[str]
+    buy_link: Optional[str]
+    web_reader_link: Optional[str]
+    embeddable: Optional[bool]
+    grade: Optional[str]
+
+def get_db_connection():
+    conn = psycopg2.connect(
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST
+    )
+    return conn
+
+@app.get("/books", response_model=List[Book])
+def get_books():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Only select the columns that match the model
+        cur.execute("""
+            SELECT title, authors, publisher, published_date, description,
+                   isbn_10, isbn_13, reading_mode_text, reading_mode_image,
+                   page_count, categories, image_small, image_large, language,
+                   sale_country, list_price_amount, list_price_currency,
+                   buy_link, web_reader_link, embeddable, grade
+            FROM books
+        """)
+        
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+        cur.close()
+        conn.close()
+        return [dict(zip(columns, row)) for row in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+8. run the cloud sql proxy, it should return "Listening on...". If you see this, keep this open and open another tab.
+```
+./cloud-sql-proxy [PROJECT-ID]:[REGION]:[INSTANCE-ID]
+```
+
+9. in the new tab, test your conneciton
+```
+psql -h /cloudsql/[PROJECT-ID]:[REGION]:[INSTANCE-ID] -U postgres -d book_recommendations_db
+```
+
+10. ensure that you are in the right directory and activate the virtual environment
+```
+cd ~/book-api
+source venv/bin/activate
+```
+
+11. Run your app 
+```
+uvicorn app:app --reload
+```
+
+12. click the "Web Preview" button and select "preview on port 8080"
+14. If this gives an error, click on the url and add /docs to the end and enter
+    orginal url: https://8080-cs-399637968661-default.cs-us-central1-pits.cloudshell.dev/?authuser=0
+    new url: https://8080-cs-399637968661-default.cs-us-central1-pits.cloudshell.dev/docs
 
 
 
