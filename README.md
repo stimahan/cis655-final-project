@@ -321,7 +321,7 @@ def get_books():
         raise HTTPException(status_code=500, detail=str(e))
 ```
 
-8. run the cloud sql proxy, it should return "Listening on...". If you see this, keep this open and open another tab.
+8. run the cloud sql proxy, it should return "Listening on...". If you see this, keep this open and open another tab. You will do this anytime you want to connect the session.
 ```
 ./cloud-sql-proxy [PROJECT-ID]:[REGION]:[INSTANCE-ID]
 ```
@@ -331,21 +331,245 @@ def get_books():
 psql -h /cloudsql/[PROJECT-ID]:[REGION]:[INSTANCE-ID] -U postgres -d book_recommendations_db
 ```
 
-10. ensure that you are in the right directory and activate the virtual environment
+10. ensure that you are in the right directory and activate the virtual environment (do this every new session)
 ```
 cd ~/book-api
 source venv/bin/activate
 ```
 
-11. Run your app 
+11. Run your app  (do this every time you change app.py or are starting a new session)
 ```
-uvicorn app:app --reload
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
 ```
 
 12. click the "Web Preview" button and select "preview on port 8080"
-14. If this gives an error, click on the url and add /docs to the end and enter
-    orginal url: https://8080-cs-399637968661-default.cs-us-central1-pits.cloudshell.dev/?authuser=0
-    new url: https://8080-cs-399637968661-default.cs-us-central1-pits.cloudshell.dev/docs
+13. If this gives an error, click on the url and add /docs to the end and enter
+    orginal url: "https://8080-cs-399637968661-default.cs-us-central1-pits.cloudshell.dev/?authuser=0"
+    new url: "https://8080-cs-399637968661-default.cs-us-central1-pits.cloudshell.dev/docs"
+14. Updated app.py to add ability to search for books by title, author, category, and grade. Also add ability to add, update, and delete books.
+```
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import psycopg2
+import os
+from typing import List
+from typing import List, Optional
+
+app = FastAPI()
+
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+
+# Removed maturity_rating
+class Book(BaseModel):
+    title: Optional[str]
+    authors: Optional[str]
+    publisher: Optional[str]
+    published_date: Optional[str]
+    description: Optional[str]
+    isbn_10: Optional[str]
+    isbn_13: Optional[str]
+    reading_mode_text: Optional[bool]
+    reading_mode_image: Optional[bool]
+    page_count: Optional[int]
+    categories: Optional[str]
+    image_small: Optional[str]
+    image_large: Optional[str]
+    language: Optional[str]
+    sale_country: Optional[str]
+    list_price_amount: Optional[float]
+    list_price_currency: Optional[str]
+    buy_link: Optional[str]
+    web_reader_link: Optional[str]
+    embeddable: Optional[bool]
+    grade: Optional[str]
+
+def get_db_connection():
+    conn = psycopg2.connect(
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST
+    )
+    return conn
+
+from fastapi import Query
+
+@app.get("/books", response_model=List[Book])
+def get_books(
+    title: str = Query(None),
+    authors: str = Query(None),
+    categories: str = Query(None),
+    grade: str = Query(None)
+):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Build query with filters
+        query = """
+            SELECT title, authors, publisher, published_date, description,
+                   isbn_10, isbn_13, reading_mode_text, reading_mode_image,
+                   page_count, categories, image_small, image_large, language,
+                   sale_country, list_price_amount, list_price_currency,
+                   buy_link, web_reader_link, embeddable, grade
+            FROM books
+        """
+        filters = []
+        values = []
+
+        if title:
+            filters.append("LOWER(title) LIKE %s")
+            values.append(f"%{title.lower()}%")
+        if authors:
+            filters.append("LOWER(authors) LIKE %s")
+            values.append(f"%{authors.lower()}%")
+        if categories:
+            filters.append("LOWER(categories) LIKE %s")
+            values.append(f"%{categories.lower()}%")
+        if grade:
+            filters.append("LOWER(grade) = %s")
+            values.append(grade.lower())
+
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+
+        cur.execute(query, values)
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+        cur.close()
+        conn.close()
+
+        return [dict(zip(columns, row)) for row in rows]
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+## new code below
+# GET book by ISBN
+@app.get("/books/isbn/{isbn}", response_model=Book)
+def get_book_by_isbn(isbn: str):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT title, authors, publisher, published_date, description,
+                   isbn_10, isbn_13, reading_mode_text, reading_mode_image,
+                   page_count, categories, image_small, image_large, language,
+                   sale_country, list_price_amount, list_price_currency,
+                   buy_link, web_reader_link, embeddable, grade
+            FROM books
+            WHERE isbn_13 = %s OR isbn_10 = %s
+        """, (isbn, isbn))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            columns = [desc[0] for desc in cur.description]
+            return dict(zip(columns, row))
+        else:
+            raise HTTPException(status_code=404, detail="Book not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+from fastapi import HTTPException
+
+# POST create a new book
+@app.post("/books", response_model=Book)
+def create_book(book: Book):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Insert book into the database
+        cur.execute("""
+            INSERT INTO books (title, authors, publisher, published_date, description,
+                               isbn_10, isbn_13, reading_mode_text, reading_mode_image,
+                               page_count, categories, image_small, image_large, language,
+                               sale_country, list_price_amount, list_price_currency,
+                               buy_link, web_reader_link, embeddable, grade)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING title, authors, publisher, published_date, description,
+                       isbn_10, isbn_13, reading_mode_text, reading_mode_image,
+                       page_count, categories, image_small, image_large, language,
+                       sale_country, list_price_amount, list_price_currency,
+                       buy_link, web_reader_link, embeddable, grade;
+        """, (book.title, book.authors, book.publisher, book.published_date, book.description,
+              book.isbn_10, book.isbn_13, book.reading_mode_text, book.reading_mode_image,
+              book.page_count, book.categories, book.image_small, book.image_large, book.language,
+              book.sale_country, book.list_price_amount, book.list_price_currency,
+              book.buy_link, book.web_reader_link, book.embeddable, book.grade))
+        
+        # Commit changes and return the inserted data
+        conn.commit()
+        cur.close()
+        conn.close()
+        return book
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# PUT update a book by isbn
+@app.put("/books/{isbn}", response_model=Book)
+def update_book(isbn: str, book: Book):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Update book in the database
+        cur.execute("""
+            UPDATE books
+            SET title = %s, authors = %s, publisher = %s, published_date = %s, description = %s,
+                isbn_10 = %s, isbn_13 = %s, reading_mode_text = %s, reading_mode_image = %s,
+                page_count = %s, categories = %s, image_small = %s, image_large = %s, language = %s,
+                sale_country = %s, list_price_amount = %s, list_price_currency = %s,
+                buy_link = %s, web_reader_link = %s, embeddable = %s, grade = %s
+            WHERE isbn_13 = %s OR isbn_10 = %s
+            RETURNING title, authors, publisher, published_date, description,
+                       isbn_10, isbn_13, reading_mode_text, reading_mode_image,
+                       page_count, categories, image_small, image_large, language,
+                       sale_country, list_price_amount, list_price_currency,
+                       buy_link, web_reader_link, embeddable, grade;
+        """, (book.title, book.authors, book.publisher, book.published_date, book.description,
+              book.isbn_10, book.isbn_13, book.reading_mode_text, book.reading_mode_image,
+              book.page_count, book.categories, book.image_small, book.image_large, book.language,
+              book.sale_country, book.list_price_amount, book.list_price_currency,
+              book.buy_link, book.web_reader_link, book.embeddable, book.grade,
+              isbn, isbn))
+        
+        # Commit changes and return the updated data
+        conn.commit()
+        cur.close()
+        conn.close()
+        return book
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# DELETE a book by isbn
+@app.delete("/books/{isbn}")
+def delete_book(isbn: str):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Delete book from the database
+        cur.execute("""
+            DELETE FROM books
+            WHERE isbn_13 = %s OR isbn_10 = %s;
+        """, (isbn, isbn))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"message": "Book deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+15.
+
+
 
 
 
