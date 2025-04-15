@@ -231,7 +231,7 @@ source venv/bin/activate
 pip install flask psycopg2-binary flask_sqlalchemy python-dotenv fastapi uvicorn
 ```
 
-5. create a .env file for your db
+5. create a .env file for your db (if this doesn't connect correctly, add to app.py code)
 ```
 DB_USER=postgres
 DB_PASSWORD=your_db_password (this is the password from when you made your private connection on your instance)
@@ -357,7 +357,8 @@ from typing import List, Optional
 
 app = FastAPI()
 
-DB_NAME = os.getenv("DB_NAME")
+#use these 4 if using .env file
+DB_NAME = os.getenv("DB_NAME") 
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
@@ -386,12 +387,13 @@ class Book(BaseModel):
     embeddable: Optional[bool]
     grade: Optional[str]
 
-def get_db_connection():
+def get_db_connection(): # i entered mine cause it wasn't connecting, but can also use .env objects
     conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST
+        dbname="book_recommendations_db",
+        user="postgres",
+        password="stimac-cis655-final",
+        host="127.0.0.1",
+        port="5432"
     )
     return conn
 
@@ -567,7 +569,243 @@ def delete_book(isbn: str):
         raise HTTPException(status_code=500, detail=str(e))
 ```
 
-15.
+15. connect to database
+```
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+```
+
+16. create `user` and `user_books` table
+```
+CREATE TABLE users (
+    user_id SERIAL PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE user_books (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(user_id),
+    title TEXT,
+    author TEXT,
+    rating INTEGER CHECK (rating >= 1 AND rating <= 5),
+    read_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+17. insert some sample data
+```
+INSERT INTO users (username, email) VALUES
+('alice', 'alice@example.com'),
+('bob', 'bob@example.com');
+
+INSERT INTO user_books (user_id, title, author, rating) VALUES
+(1, 'Charlotte’s Web', 'E. B. White', 5),
+(1, 'Matilda', 'Roald Dahl', 4),
+(2, 'The Giver', 'Lois Lowry', 5),
+(2, 'The Hobbit', 'J.R.R. Tolkien', 3);
+```
+
+18. update app.py for user and user_books
+```
+# USER options
+
+# GET all users
+@app.get("/users")
+def get_users():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users")
+    users = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return users
+
+# GET user by ID
+@app.get("/users/{user_id}")
+def get_user(user_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
+    user = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    if user:
+        return user
+    raise HTTPException(status_code=404, detail="User not found")
+
+# POST create new user
+@app.post("/users")
+def create_user(username: str, email: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO users (username, email) VALUES (%s, %s) RETURNING *",
+        (username, email)
+    )
+    user = cursor.fetchone()
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return user
+
+# PUT update user
+@app.put("/users/{user_id}")
+def update_user(user_id: int, username: str, email: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET username = %s, email = %s WHERE user_id = %s RETURNING *",
+        (username, email, user_id)
+    )
+    user = cursor.fetchone()
+    conn.commit()
+    cursor.close()
+    conn.close()
+    if user:
+        return user
+    raise HTTPException(status_code=404, detail="User not found")
+
+# DELETE user
+@app.delete("/users/{user_id}")
+def delete_user(user_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM users WHERE user_id = %s RETURNING *", (user_id,))
+    user = cursor.fetchone()
+    conn.commit()
+    cursor.close()
+    conn.close()
+    if user:
+        return {"message": "User deleted"}
+    raise HTTPException(status_code=404, detail="User not found")
+
+
+## USER_BOOKS 
+
+class UserBook(BaseModel):
+    user_id: int
+    title: str
+    author: str
+    rating: Optional[int] = None
+    read_at: Optional[str] = None  # or datetime if you prefer
+    status: Optional[str] = None
+    progress: Optional[int] = None
+    notes: Optional[str] = None
+
+# get all user-book enteries
+@app.get("/user_books")
+def get_all_user_books():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM user_books")
+    records = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return records
+
+# get books for specific user
+from fastapi import Query
+
+@app.get("/user_books/{user_id}")
+def get_user_books(
+    user_id: int,
+    status: Optional[str] = Query(None),
+    rating: Optional[int] = Query(None),
+    progress: Optional[int] = Query(None)
+):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = "SELECT * FROM user_books WHERE user_id = %s"
+    values = [user_id]
+
+    if status:
+        query += " AND status = %s"
+        values.append(status)
+    if rating:
+        query += " AND rating = %s"
+        values.append(rating)
+    if progress:
+        query += " AND progress = %s"
+        values.append(progress)
+
+    cursor.execute(query, values)
+    user_books = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return user_books
+
+
+# create new user book entry
+@app.post("/user_books")
+def create_user_book(user_book: UserBook):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO user_books (user_id, title, author, rating, status, progress, notes)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING *;
+    """, (
+        user_book.user_id,
+        user_book.title,
+        user_book.author,
+        user_book.rating,
+        user_book.status,
+        user_book.progress,
+        user_book.notes
+    ))
+    new_entry = cursor.fetchone()
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return new_entry
+
+# update entry by id
+@app.put("/user_books/{entry_id}")
+def update_user_book(entry_id: int, user_book: UserBook):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE user_books
+        SET user_id = %s, title = %s, author = %s, rating = %s,
+            status = %s, progress = %s, notes = %s
+        WHERE id = %s
+        RETURNING *;
+    """, (
+        user_book.user_id,
+        user_book.title,
+        user_book.author,
+        user_book.rating,
+        user_book.status,
+        user_book.progress,
+        user_book.notes,
+        entry_id
+    ))
+    updated_entry = cursor.fetchone()
+    conn.commit()
+    cursor.close()
+    conn.close()
+    if updated_entry:
+        return updated_entry
+    raise HTTPException(status_code=404, detail="Entry not found")
+
+# delete entry by id
+@app.delete("/user_books/{entry_id}")
+def delete_user_book(entry_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_books WHERE id = %s RETURNING *", (entry_id,))
+    deleted = cursor.fetchone()
+    conn.commit()
+    cursor.close()
+    conn.close()
+    if deleted:
+        return {"message": "User-book entry deleted"}
+    raise HTTPException(status_code=404, detail="Entry not found")
+
+```
+19. consider merging books and user_books
 
 
 
