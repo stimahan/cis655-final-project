@@ -127,14 +127,15 @@ print("CSV saved as k8_books_40.csv")
 # Connect SQL Instance to your bucket and get your csv file
 1. Open CloudShell Terminal
 
-1. start CloudProxy
+1. start CloudProxy, it should return "Listening on...". If you see this, keep this open and open another tab. You will do this anytime you want to connect the session.
 ```
-./cloud-sql-proxy [PROJECT_ID]:[REGION}:[INSTANCE-NAME] -p 5433
+./cloud-sql-proxy book-recommendations-456120:us-central1:book-recs-db
+#you can copy your connection info by clicking on instance and finding "connection name"
 ```
 
 2. connect to PostgreSQL
 ```
-psql -h 127.0.0.1 -U postgres -p 5433
+psql -h 127.0.0.1 -U postgres -p 5432
 ```
 
 3. create a new database
@@ -246,7 +247,7 @@ echo $DB_USER
 echo $DB_PASSWORD
 echo $DB_HOST
 ```
-
+## `books` and app.py
 7. click "Editor" button, navigate to books-api and create a new file named app.py
 ```
 from fastapi import FastAPI, HTTPException
@@ -321,7 +322,7 @@ def get_books():
         raise HTTPException(status_code=500, detail=str(e))
 ```
 
-8. run the cloud sql proxy, it should return "Listening on...". If you see this, keep this open and open another tab. You will do this anytime you want to connect the session.
+8. *run the cloud sql proxy, it should return "Listening on...". If you see this, keep this open and open another tab. You will do this anytime you want to connect the session.*
 ```
 ./cloud-sql-proxy [PROJECT-ID]:[REGION]:[INSTANCE-ID]
 ```
@@ -331,13 +332,13 @@ def get_books():
 psql -h /cloudsql/[PROJECT-ID]:[REGION]:[INSTANCE-ID] -U postgres -d book_recommendations_db
 ```
 
-10. ensure that you are in the right directory and activate the virtual environment (do this every new session)
+10. *ensure that you are in the right directory and activate the virtual environment (do this every new session)*
 ```
 cd ~/book-api
 source venv/bin/activate
 ```
 
-11. Run your app  (do this every time you change app.py or are starting a new session)
+11. Run your app  *(do this every time you change app.py or are starting a new session)*
 ```
 uvicorn app:app --host=0.0.0.0 --port=8080 --reload
 ```
@@ -346,7 +347,7 @@ uvicorn app:app --host=0.0.0.0 --port=8080 --reload
 13. If this gives an error, click on the url and add /docs to the end and enter
     orginal url: "https://8080-cs-399637968661-default.cs-us-central1-pits.cloudshell.dev/?authuser=0"
     new url: "https://8080-cs-399637968661-default.cs-us-central1-pits.cloudshell.dev/docs"
-14. Updated app.py to add ability to search for books by title, author, category, and grade. Also add ability to add, update, and delete books.
+14. Update app.py to add ability to search for books by title, author, category, and grade. Also add ability to add, update, and delete books.
 ```
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -568,12 +569,17 @@ def delete_book(isbn: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 ```
+*REMINDER*: Rerun uvicorn in terminal after changing app.py
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+
 
 15. connect to database
 ```
 psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
 ```
-
+## `user` and `user_books`
 16. create `user` and `user_books` table
 ```
 CREATE TABLE users (
@@ -592,6 +598,11 @@ CREATE TABLE user_books (
     read_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
+*REMINDER*: Rerun uvicorn in terminal after changing app.py
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+
 
 17. insert some sample data
 ```
@@ -805,12 +816,671 @@ def delete_user_book(entry_id: int):
     raise HTTPException(status_code=404, detail="Entry not found")
 
 ```
-19. consider merging books and user_books
+*REMINDER*: Rerun uvicorn in terminal after changing app.py
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
 
 
 
+19. merge books and user_books
+```
+# make sure ./cloud-sql-proxy book-recommendations-456120:us-central1:book-recs-db is still running in other tab
+
+# connect to the database
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+```
+
+20. update `user_books` (if needed)
+```
+ALTER TABLE user_books
+ADD COLUMN status TEXT,
+ADD COLUMN progress INTEGER,
+ADD COLUMN notes TEXT,
+ADD COLUMN isbn_10 TEXT;
+```
+
+21. In EDITOR, open the app.py
+```
+## USER_BOOKS 
+
+class UserBook(BaseModel):
+    user_id: int
+    title: str
+    author: str
+    rating: Optional[int] = None
+    read_at: Optional[str] = None  # or datetime if you prefer
+    status: Optional[str] = None
+    progress: Optional[int] = None
+    notes: Optional[str] = None
+
+# get all user-book enteries
+@app.get("/user_books")
+def get_all_user_books():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM user_books")
+    records = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return records
+
+# get books for specific user
+from fastapi import Query
+
+@app.get("/user_books/{user_id}")
+def get_user_books(user_id: int, status: Optional[str] = Query(None)):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        query = """
+            SELECT b.title, b.authors, b.image_small, b.categories, b.grade,
+                   ub.rating, ub.status, ub.progress, ub.notes, ub.read_at
+            FROM user_books ub
+            JOIN books b
+              ON LOWER(ub.title) = LOWER(b.title)
+             AND LOWER(ub.author) = LOWER(b.authors)
+            WHERE ub.user_id = %s
+        """
+        params = [user_id]
+
+        if status:
+            query += " AND ub.status = %s"
+            params.append(status)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+
+        cursor.close()
+        conn.close()
+
+        return [dict(zip(columns, row)) for row in rows]
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+# create new user book entry
+@app.post("/user_books")
+def create_user_book(user_book: UserBook):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO user_books (user_id, title, author, rating, status, progress, notes)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING *;
+    """, (
+        user_book.user_id,
+        user_book.title,
+        user_book.author,
+        user_book.rating,
+        user_book.status,
+        user_book.progress,
+        user_book.notes
+    ))
+    new_entry = cursor.fetchone()
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return new_entry
+
+# update entry by id
+@app.put("/user_books/{entry_id}")
+def update_user_book(entry_id: int, user_book: UserBook):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE user_books
+        SET user_id = %s, title = %s, author = %s, rating = %s,
+            status = %s, progress = %s, notes = %s
+        WHERE id = %s
+        RETURNING *;
+    """, (
+        user_book.user_id,
+        user_book.title,
+        user_book.author,
+        user_book.rating,
+        user_book.status,
+        user_book.progress,
+        user_book.notes,
+        entry_id
+    ))
+    updated_entry = cursor.fetchone()
+    conn.commit()
+    cursor.close()
+    conn.close()
+    if updated_entry:
+        return updated_entry
+    raise HTTPException(status_code=404, detail="Entry not found")
+
+# delete entry by id
+@app.delete("/user_books/{entry_id}")
+def delete_user_book(entry_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_books WHERE id = %s RETURNING *", (entry_id,))
+    deleted = cursor.fetchone()
+    conn.commit()
+    cursor.close()
+    conn.close()
+    if deleted:
+        return {"message": "User-book entry deleted"}
+    raise HTTPException(status_code=404, detail="Entry not found")
 
 
+from fastapi import Query
 
+@app.get("/user_books/{user_id}")
+def get_user_books(user_id: int, status: Optional[str] = Query(None)):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        query = """
+            SELECT b.title, b.authors, b.image_small, b.categories, b.grade,
+                   ub.rating, ub.status, ub.progress, ub.notes, ub.read_at
+            FROM user_books ub
+            JOIN books b ON ub.isbn_10 = b.isbn_10
+            WHERE ub.user_id = %s
+        """
+        params = [user_id]
+
+        if status:
+            query += " AND ub.status = %s"
+            params.append(status)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+
+        cursor.close()
+        conn.close()
+
+        return [dict(zip(columns, row)) for row in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+*REMINDER*: Rerun uvicorn in terminal after changing app.py
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+
+22. return to the terminal and open your db again
+```
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+```
+
+23. enable an extension to help with fuzzy matching, so that book titles and authors will match even if there are capitalization or minor spelling errors
+```
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+``` 
+
+24. open app.py in editor and update get_user_books
+```
+@app.get("/user_books/{user_id}")
+def get_user_books(user_id: int, status: Optional[str] = Query(None)):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        query = """
+            SELECT b.title, b.authors, b.image_small, b.categories, b.grade,
+                   ub.rating, ub.status, ub.progress, ub.notes, ub.read_at
+            FROM user_books ub
+            JOIN books b
+              ON similarity(ub.title, b.title) > 0.4
+             AND similarity(ub.author, b.authors) > 0.4
+            WHERE ub.user_id = %s
+        """
+        params = [user_id]
+
+        if status:
+            query += " AND ub.status = %s"
+            params.append(status)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+
+        cursor.close()
+        conn.close()
+
+        return [dict(zip(columns, row)) for row in rows]
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+*REMINDER*: Rerun uvicorn in terminal after changing app.py
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+
+26. update tables so that users can add books and ratings for books that arent already in the table. I did not include title and author in this update because we are keeping them as required.
+```
+sql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+
+ALTER TABLE books
+    ALTER COLUMN published_date   DROP NOT NULL,
+    ALTER COLUMN description      DROP NOT NULL,
+    ALTER COLUMN categories       DROP NOT NULL,
+    ALTER COLUMN image_small      DROP NOT NULL,
+    ALTER COLUMN image_large      DROP NOT NULL,
+    ALTER COLUMN language         DROP NOT NULL,
+    ALTER COLUMN sale_country     DROP NOT NULL,
+    ALTER COLUMN grade            DROP NOT NULL;
+```
+
+27. update UserBook model in app.py
+```
+class UserBook(BaseModel):
+    user_id: int
+    title: str
+    author: str
+    isbn_10: Optional[str] = None  
+    rating: Optional[int] = None
+    read_at: Optional[str] = None
+    status: Optional[str] = None
+    progress: Optional[int] = None
+    notes: Optional[str] = None
+```
+
+
+28. update POST/user_books model in app.py
+```
+@app.post("/user_books")
+def add_user_book(entry: UserBook):
+    conn = get_db_connection()
+    cur  = conn.cursor()
+
+    try:
+        # 1. Does the book already exist?  (match by isbn_10 first, else title+author)
+        cur.execute("""
+            SELECT isbn_10 FROM books
+            WHERE (isbn_10 IS NOT NULL AND isbn_10 = %s)
+               OR (LOWER(title) = LOWER(%s) AND LOWER(authors) = LOWER(%s))
+            LIMIT 1
+        """, (entry.isbn_10, entry.title, entry.author))
+        row = cur.fetchone()
+
+        # 2. If missing, insert a minimal book row
+        if not row:
+            cur.execute("""
+                INSERT INTO books (title, authors, isbn_10)
+                VALUES (%s, %s, %s)
+            """, (entry.title, entry.author, entry.isbn_10))
+
+        # 3. Insert into user_books
+        cur.execute("""
+            INSERT INTO user_books (user_id, title, author, isbn_10,
+                                    rating, status, progress, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (
+            entry.user_id, entry.title, entry.author, entry.isbn_10,
+            entry.rating, entry.status, entry.progress, entry.notes
+        ))
+        new_row = cur.fetchone()
+        conn.commit()
+        return dict(zip([d[0] for d in cur.description], new_row))
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+```
+*REMINDER*: Rerun uvicorn in terminal after changing app.py
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+
+29. add a SQL-based recommendations line to app.py that will give recommendations based on top-rated, grade level books that are unread by the user. this is really more for testing.
+```
+@app.get("/recommendations/{user_id}")
+def recommendations(user_id: int, limit: int = 5):
+    conn = get_db_connection()
+    cur  = conn.cursor()
+
+    cur.execute("""
+        WITH user_grade AS (
+            SELECT DISTINCT b.grade
+            FROM user_books ub
+            JOIN books b ON ub.isbn_10 = b.isbn_10
+            WHERE ub.user_id = %s
+              AND ub.rating IS NOT NULL
+        ),
+        candidate_books AS (
+            SELECT b.isbn_10, b.title, b.authors, b.grade,
+                   COALESCE(AVG(ub2.rating),0) AS avg_rating,
+                   COUNT(ub2.rating)           AS num_ratings
+            FROM books b
+            LEFT JOIN user_books ub2 ON b.isbn_10 = ub2.isbn_10
+            WHERE b.grade IN (SELECT grade FROM user_grade)
+              AND b.isbn_10 NOT IN (
+                    SELECT isbn_10 FROM user_books WHERE user_id = %s
+              )
+            GROUP BY b.isbn_10, b.title, b.authors, b.grade
+        )
+        SELECT * FROM candidate_books
+        ORDER BY avg_rating DESC, num_ratings DESC
+        LIMIT %s;
+    """, (user_id, user_id, limit))
+
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    cur.close(); conn.close()
+    return [dict(zip(cols, r)) for r in rows]
+```
+*REMINDER*: Rerun uvicorn in terminal after changing app.py
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+
+30. add another books csv to make the recommendations run better
+```
+# copy the csv from the bucket to the shell
+gsutil cp gs://k8-books-bucket/books.csv .
+
+# open the db
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+
+# in the db, import the data from the new csv
+\copy books(
+    title,authors,publisher,published_date,description,
+    isbn_10,isbn_13,reading_mode_text,reading_mode_image,
+    page_count,categories,image_small,image_large,language,
+    sale_country,list_price_amount,list_price_currency,
+    buy_link,web_reader_link,embeddable,grade
+) FROM 'books.csv'
+  WITH (FORMAT csv, HEADER true, NULL 'NA');
+```
+
+31. still in the db, alter the user table to include a grade level for the user
+```
+# alter user table to add grade
+ALTER TABLE users
+ADD COLUMN grade TEXT;
+ALTER TABLE
+
+# update the current users
+UPDATE users SET grade = '3' WHERE username = 'alice';
+UPDATE users SET grade = '4' WHERE username = 'bob_smith';
+UPDATE users SET grade = '5' WHERE username = 'hstimac';
+```
+
+32. update the recommendations section of app.py
+```
+@app.get("/recommendations/{user_id}")
+def recommendations(user_id: int, limit: int = 5):
+    conn = get_db_connection()
+    cur  = conn.cursor()
+
+    
+    cur.execute("SELECT grade FROM users WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    user_grade = row[0] if row and row[0] else None
+
+    # If user.grade is NULL, derive grade(s) from their rated books
+    if not user_grade:
+        cur.execute("""
+            SELECT DISTINCT b.grade
+            FROM   user_books ub
+            JOIN   books b
+              ON  (ub.isbn_10 IS NOT NULL AND ub.isbn_10 = b.isbn_10)
+               OR (LOWER(ub.title)  = LOWER(b.title)
+               AND LOWER(ub.author) = LOWER(b.authors))
+            WHERE  ub.user_id = %s
+              AND  ub.rating IS NOT NULL
+        """, (user_id,))
+        grades = [g[0] for g in cur.fetchall() if g[0] is not None]
+    else:
+        grades = [user_grade]
+
+    
+    if grades:
+        grade_filter_sql = "b.grade IN %s"
+        grade_filter_val = (tuple(grades),)
+    else:
+        # no grade info – use all grades
+        grade_filter_sql = "TRUE"
+        grade_filter_val = tuple()
+
+    cur.execute(f"""
+        WITH candidate AS (
+            SELECT b.isbn_10, b.title, b.authors, b.grade,
+                   COALESCE(AVG(ub2.rating),0) AS avg_rating,
+                   COUNT(ub2.rating)           AS num_ratings
+            FROM books b
+            LEFT JOIN user_books ub2 ON b.isbn_10 = ub2.isbn_10
+            WHERE {grade_filter_sql}
+              AND NOT EXISTS (
+                SELECT 1 FROM user_books ub
+                WHERE  ub.user_id = %s
+                  AND (
+                       (ub.isbn_10 IS NOT NULL AND ub.isbn_10 = b.isbn_10)
+                    OR (LOWER(ub.title)  = LOWER(b.title)
+                    AND LOWER(ub.author) = LOWER(b.authors))
+                  )
+              )
+            GROUP BY b.isbn_10, b.title, b.authors, b.grade
+        )
+        SELECT * FROM candidate
+        ORDER BY avg_rating DESC, num_ratings DESC
+        LIMIT %s;
+    """, grade_filter_val + (user_id, limit))
+
+    rows = cur.fetchall()
+
+    
+    if not rows:
+        cur.execute("""
+            SELECT title, authors, grade
+            FROM   books
+            ORDER  BY RANDOM()
+            LIMIT  %s;
+        """, (limit,))
+        rows = cur.fetchall()
+
+    cols = [d[0] for d in cur.description]
+    cur.close(); conn.close()
+    return [dict(zip(cols, r)) for r in rows]
+```
+*REMINDER*: Rerun uvicorn in terminal after changing app.py
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+
+# Connect Vertext AI and BigQuery 
+1. enable services in the shell terminal
+```
+gcloud services enable \
+    aiplatform.googleapis.com \
+    bigquery.googleapis.com \
+    eventarc.googleapis.com \
+    pubsub.googleapis.com \
+    cloudfunctions.googleapis.com
+```
+
+2. set up BigQuery
+```
+# create a dataset
+bq mk book_recs
+
+# create embeddings table
+bq query --use_legacy_sql=false "
+CREATE TABLE book_recs.book_embeddings (
+  isbn_10 STRING NOT NULL,
+  embedding ARRAY<FLOAT64>,
+  PRIMARY KEY(isbn_10) NOT ENFORCED
+);
+"
+```
+
+3. create a pub/sub topic for new books and for rating books
+```
+gcloud pubsub topics create new-book
+gcloud pubsub topics create rate-book
+```
+
+4. update POST /books in app.py with pub/sub
+```
+from google.cloud import pubsub_v1
+import json
+
+publisher = pubsub_v1.PublisherClient()
+topic_path = publisher.topic_path("book-recommendations-456120", "new-book")
+
+def publish_new_book(book_data: dict):
+    payload = json.dumps({
+        "isbn_10": book_data["isbn_10"],
+        "description": book_data["description"]
+    }).encode("utf-8")
+
+    future = publisher.publish(topic_path, payload)
+    print(f"📨 Published to Pub/Sub: {future.result()}")
+```
+5. make a new directory and folder
+```
+mkdir ~/rate-book-function
+cd ~/rate-book-function
+```
+
+7. create main.py in the rate-book-function
+```
+import base64
+import json
+import os
+from google.cloud import storage
+import psycopg2
+
+DB_USER = "postgres"
+DB_PASS = "stimac-cis655-final"
+DB_NAME = "book_recommendations_db"
+DB_HOST = "/cloudsql/book-recommendations-456120:us-central1:book-recs-db"
+
+def get_conn():
+    return psycopg2.connect(
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASS,
+        host=DB_HOST
+    )
+
+def entry_point(event, context):
+    data = json.loads(base64.b64decode(event["data"]).decode("utf-8"))
+
+    isbn_10 = data.get("isbn_10")
+    title   = data["title"]
+    author  = data["author"]
+    user_id = data["user_id"]
+    rating  = data.get("rating")
+    status  = data.get("status")
+    progress = data.get("progress")
+    notes   = data.get("notes")
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    try:
+        # 1. Insert book if it doesn't exist
+        cur.execute("""
+            SELECT 1 FROM books WHERE isbn_10 = %s
+        """, (isbn_10,))
+        if not cur.fetchone():
+            cur.execute("""
+                INSERT INTO books (title, authors, isbn_10)
+                VALUES (%s, %s, %s)
+            """, (title, author, isbn_10))
+            print(f" Added new book: {title}")
+
+        # 2. Insert into user_books
+        cur.execute("""
+            INSERT INTO user_books (user_id, title, author, isbn_10, rating, status, progress, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (user_id, title, author, isbn_10, rating, status, progress, notes))
+        print(f" Added rating: {rating} for user {user_id}")
+
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        print(f" Error: {e}")
+    finally:
+        cur.close()
+        conn.close()
+```
+
+8. create a requirements.txt in the rate-book-function
+```
+psycopg2-binary
+google-cloud-storage
+```
+
+9. deploy the function
+```
+gcloud functions deploy rate-book-writer \
+  --runtime python311 \
+  --entry-point entry_point \
+  --trigger-topic rate-book \
+  --region us-central1 \
+  --memory 512MB \
+  --timeout 60s \
+  --source . \
+  --no-gen2 \
+  --set-env-vars GCP_PROJECT=book-recommendations-456120
+```
+
+10. test the function
+```
+gcloud pubsub topics publish rate-book \
+  --message='{
+    "user_id": 1,
+    "title": "Charlotte’s Web",
+    "author": "E. B. White",
+    "isbn_10": "0064400557",
+    "rating": 5,
+    "status": "finished",
+    "progress": 100,
+    "notes": "So sweet!"
+  }'
+```
+
+11. update app.py to connect to pub/sub, add to bottom of code
+```
+from google.cloud import pubsub_v1
+import json
+
+def publish_rating_event(entry: dict):
+    publisher = pubsub_v1.PublisherClient()
+    topic_path = publisher.topic_path("book-recommendations-456120", "rate-book")
+    payload = json.dumps(entry).encode("utf-8")
+    publisher.publish(topic_path, payload)
+```
+
+12. replace add_user_books in app.py
+```
+@app.post("/user_books")
+def add_user_book(entry: UserBook):
+    # Publish the rating event to Pub/Sub first
+    try:
+        publish_rating_event(entry.dict())
+        return {"message": "Rating submitted to Pub/Sub successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to publish rating event: {str(e)}")
+```
+
+13. add pub.sub to requirements.txt
+```
+google-cloud-pubsub
+```
+
+14. install pub/sub if not installed in shell
+```
+pip install google-cloud-pubsub
+```
+
+15.
