@@ -1311,13 +1311,13 @@ gcloud services enable \
 bq mk book_recs
 
 # create embeddings table
-bq query --use_legacy_sql=false "
-CREATE TABLE book_recs.book_embeddings (
-  isbn_10 STRING NOT NULL,
-  embedding ARRAY<FLOAT64>,
-  PRIMARY KEY(isbn_10) NOT ENFORCED
-);
-"
+bq query --use_legacy_sql=false """
+CREATE OR REPLACE TABLE book_recs.book_embeddings (
+  isbn_10 STRING,
+  title STRING,
+  embedding ARRAY<FLOAT64>
+)
+"""
 ```
 
 3. create a pub/sub topic for new books and for rating books
@@ -1341,7 +1341,7 @@ def publish_new_book(book_data: dict):
     }).encode("utf-8")
 
     future = publisher.publish(topic_path, payload)
-    print(f"📨 Published to Pub/Sub: {future.result()}")
+    print(f" Published to Pub/Sub: {future.result()}")
 ```
 5. make a new directory and folder
 ```
@@ -1483,4 +1483,293 @@ google-cloud-pubsub
 pip install google-cloud-pubsub
 ```
 
-15.
+
+15. create embeddings for Vertex AI
+```
+# enable Vertext AI in the shell termnial
+gcloud services enable aiplatform.googleapis.com
+
+# install the SDK in the terminal
+pip install google-cloud-aiplatform
+```
+
+16. add to requirements.txt
+```
+google-cloud-aiplatform
+```
+
+17. open editor and create file generate_embeddings.py inside book-api
+```
+import vertexai
+from vertexai.language_models import TextEmbeddingModel
+from google.cloud import bigquery
+
+# Constants
+PROJECT_ID = "book-recommendations-456120"
+REGION = "us-central1"
+MODEL_ID = "text-embedding-005" 
+
+vertexai.init(project=PROJECT_ID, location=REGION)
+model = TextEmbeddingModel.from_pretrained(MODEL_ID)
+bq_client = bigquery.Client()
+
+# Example book description
+title = "Matilda"
+isbn_10 = "042528767X"
+text = "Matilda is a story about a brilliant young girl with telekinesis and awful parents."
+
+# Generate embedding
+embedding = model.get_embeddings([text])[0].values
+
+# Insert into BigQuery
+row = {"isbn_10": isbn_10, "title": title, "embedding": embedding}
+errors = bq_client.insert_rows_json(f"{PROJECT_ID}.book_recs.book_embeddings", [row])
+
+if errors:
+    print(" BigQuery insert failed:", errors)
+else:
+    print(f" Inserted embedding for: {title}")
+```
+
+19. in console, click Navigation >> Vertex AI >> Dashboard >> enable all recommended APIs
+
+20. run in shell, make sure you're in correct directory
+```
+cd ~/book-api
+python generate_embeddings.py
+```
+
+21. update generate_embeddings.py to loop through all books and generate embeddings
+```
+import vertexai
+from vertexai.language_models import TextEmbeddingModel
+from google.cloud import bigquery
+import psycopg2
+
+# Constants
+PROJECT_ID = "book-recommendations-456120"
+REGION = "us-central1"
+MODEL_ID = "text-embedding-005" 
+
+vertexai.init(project=PROJECT_ID, location=REGION)
+model = TextEmbeddingModel.from_pretrained(MODEL_ID)
+bq_client = bigquery.Client()
+
+# DB connection settings
+conn = psycopg2.connect(
+    dbname="book_recommendations_db",
+    user="postgres",
+    password="stimac-cis655-final",
+    host="127.0.0.1",
+    port="5432"
+)
+cur = conn.cursor()
+
+# Query books with non-empty descriptions
+cur.execute("""
+    SELECT isbn_10, title, description
+    FROM books
+    WHERE description IS NOT NULL AND LENGTH(description) > 50
+""")
+
+books = cur.fetchall()
+
+print(f" Found {len(books)} books to embed")
+
+for isbn_10, title, description in books:
+    try:
+        embedding = model.get_embeddings([description])[0].values
+
+        row = {
+            "isbn_10": isbn_10,
+            "title": title,
+            "embedding": embedding
+        }
+
+        errors = bq_client.insert_rows_json("book-recommendations-456120.book_recs.book_embeddings", [row])
+
+        if errors:
+            print(f" Failed to insert {title}: {errors}")
+        else:
+            print(f" Inserted: {title}")
+
+    except Exception as e:
+        print(f" Error for {title}: {e}")
+
+cur.close()
+conn.close()
+```
+
+22. rereun it in shell
+```
+python generate_embeddings.py
+```
+
+23. click Navigation >> BigQuery >> Studio >> book-recommendations-456120 (project name)
+
+24. press the blue plus sign or the SQL query button to open a blank query page
+
+25. enter the below code and press RUN
+```
+DECLARE target_isbn STRING DEFAULT "042528767X";  # must be an isbn_10 from embeddings
+
+WITH
+target AS (
+  SELECT embedding
+  FROM `book-recommendations-456120.book_recs.book_embeddings`
+  WHERE isbn_10 = target_isbn
+),
+
+scored AS (
+  SELECT
+    b2.isbn_10,
+    b2.title,
+    b2.embedding,
+
+    (
+      SELECT SUM(e1 * e2)
+      FROM UNNEST(b2.embedding) AS e1 WITH OFFSET i
+      JOIN UNNEST(target.embedding) AS e2 WITH OFFSET j
+      ON i = j
+    ) /
+    (
+      SQRT(
+        (SELECT SUM(POW(val, 2)) FROM UNNEST(b2.embedding) AS val)
+      ) *
+      SQRT(
+        (SELECT SUM(POW(val2, 2)) FROM UNNEST(target.embedding) AS val2)
+      )
+    ) AS similarity
+
+  FROM `book-recommendations-456120.book_recs.book_embeddings` b2, target
+  WHERE b2.isbn_10 != target_isbn
+)
+
+SELECT *
+FROM scored
+ORDER BY similarity DESC
+LIMIT 10;
+```
+
+26. turn this into an api endpoint by adding to app.py, place at bottom of current code
+```
+from fastapi import Path
+from google.cloud import bigquery
+
+
+@app.get("/recommendations/by-book")
+def recommend_by_book(
+    isbn_10: str = Query(None, description="ISBN-10 of the book"),
+    title: str = Query(None, description="Title of the book"),
+    authors: str = Query(None, description="Author(s) of the book"),
+    grade: str = Query(None, description="Grade level to filter"),
+    limit: int = Query(10, description="Max number of recommendations")
+):
+    try:
+        client = bigquery.Client()
+
+        if isbn_10:
+            match_condition = f"isbn_10 = \"{isbn_10}\""
+            exclude_condition = f"b2.isbn_10 != \"{isbn_10}\""
+        elif title and authors:
+            match_condition = f"LOWER(title) = LOWER(\"{title}\") AND LOWER(authors) = LOWER(\"{authors}\")"
+            exclude_condition = "TRUE"
+        else:
+            raise HTTPException(status_code=400, detail="Must provide either ISBN-10 or both title and authors.")
+
+        filter_grade = f"AND b2.grade = \"{grade}\"" if grade else ""
+
+        query = f"""
+        WITH
+        target AS (
+          SELECT embedding
+          FROM `book-recommendations-456120.book_recs.book_embeddings`
+          WHERE {match_condition}
+        ),
+
+        scored AS (
+          SELECT
+            b2.isbn_10,
+            b2.title,
+            b2.authors,
+            b2.grade,
+            (
+              SELECT SUM(e1 * e2)
+              FROM UNNEST(b2.embedding) AS e1 WITH OFFSET i
+              JOIN UNNEST(target.embedding) AS e2 WITH OFFSET j
+              ON i = j
+            ) /
+            (
+              SQRT((SELECT SUM(POW(val, 2)) FROM UNNEST(b2.embedding) AS val)) *
+              SQRT((SELECT SUM(POW(val2, 2)) FROM UNNEST(target.embedding) AS val2))
+            ) AS similarity
+          FROM `book-recommendations-456120.book_recs.book_embeddings` b2, target
+          WHERE {exclude_condition} {filter_grade}
+        )
+
+        SELECT *
+        FROM scored
+        ORDER BY similarity DESC
+        LIMIT {limit};
+        """
+
+        job = client.query(query)
+        results = job.result()
+        return [dict(row) for row in results]
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+27. run in shell terminal
+```
+# make sure in right directory and in virtual environment
+cd ~/book-api
+source venv/bin/activate
+
+# install if not already installed
+pip install google-cloud-bigquery
+
+# reload the app
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+
+```
+
+28. change recommendations/user_id line in app.py to avoid issue
+```
+@app.get("/recommendations/user/{user_id}")
+```
+
+29. update BigQuery book_embeddings table to fix an error: Navigation >> BigQuery>> Studio >> select project name >> book_recs >> book_embeddings >> click Edit Schema button >> make sure you have title, author, grade, isbn_10 all as string nullable and embeddings as float repeated
+
+30. export/extract more variables to enhance recommendations
+```
+# export 
+gcloud sql export csv book-recs-db \
+  gs://k8-books-bucket/book.csv \
+  --database=book_recommendations_db \
+  --query="SELECT isbn_10, title, authors, grade, description FROM books WHERE isbn_10 IS NOT NULL AND title IS NOT NULL" \
+  --offload
+
+# if denied, grant permission, find email
+gcloud sql instances describe book-recs-db \
+  --format="value(serviceAccountEmailAddress)"
+
+# then grant permission 
+gsutil iam ch \
+  serviceAccount:p968113828557-ubbsf9@gcp-sa-cloud-sql.iam.gserviceaccount.com:roles/storage.objectAdmin \
+  gs://k8-books-bucket
+
+# then rerun export command
+```
+
+31.  import/update BigQuery
+```
+bq load \
+  --source_format=CSV \
+  --skip_leading_rows=1 \
+  book_recs.book_embeddings \
+  gs://k8-books-bucket/book.csv \
+  isbn_10:STRING,title:STRING,authors:STRING,grade:STRING,description:STRING
+```
+32.  NOTE i accidently deleted embedding and table, need to fix this.
