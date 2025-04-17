@@ -1772,4 +1772,670 @@ bq load \
   gs://k8-books-bucket/book.csv \
   isbn_10:STRING,title:STRING,authors:STRING,grade:STRING,description:STRING
 ```
-32.  NOTE i accidently deleted embedding and table, need to fix this.
+32.  update generate_embeddings.py to fix error of missing variables
+```
+import vertexai
+from vertexai.language_models import TextEmbeddingModel
+from google.cloud import bigquery
+import psycopg2
+
+# Constants
+PROJECT_ID = "book-recommendations-456120"
+REGION = "us-central1"
+MODEL_ID = "text-embedding-005" 
+
+# Initialize Vertex AI and BigQuery client
+vertexai.init(project=PROJECT_ID, location=REGION)
+model = TextEmbeddingModel.from_pretrained(MODEL_ID)
+bq_client = bigquery.Client()
+
+# DB connection
+conn = psycopg2.connect(
+    dbname="book_recommendations_db",
+    user="postgres",
+    password="stimac-cis655-final",
+    host="127.0.0.1",
+    port="5432"
+)
+cur = conn.cursor()
+
+# Query books with sufficient description
+cur.execute("""
+    SELECT isbn_10, title, authors, grade, description
+    FROM books
+    WHERE description IS NOT NULL AND LENGTH(description) > 10
+""")
+
+books = cur.fetchall()
+
+print(f"Found {len(books)} books to embed")
+
+for isbn_10, title, authors, grade, description in books:
+    try:
+        embedding = model.get_embeddings([description])[0].values
+
+        row = {
+            "isbn_10": isbn_10,
+            "title": title,
+            "authors": authors,
+            "grade": grade,
+            "description": description,
+            "embedding": embedding
+        }
+
+        errors = bq_client.insert_rows_json(
+            "book-recommendations-456120.book_recs.book_embeddings",
+            [row]
+        )
+
+        if errors:
+            print(f"Failed to insert {title}: {errors}")
+        else:
+            print(f"Inserted: {title}")
+
+    except Exception as e:
+        print(f"Error processing {title}: {e}")
+
+cur.close()
+conn.close()
+```
+
+33.  rerun in shell
+```
+python generate_embeddings.py
+```
+
+34.  updated BigQuery SQL query (named mine bigquery sql template)
+```
+DECLARE target_isbn STRING DEFAULT "0375866116";
+DECLARE target_title STRING DEFAULT NULL;
+DECLARE target_authors STRING DEFAULT NULL;
+DECLARE target_grade STRING DEFAULT NULL;
+DECLARE target_keyword STRING DEFAULT NULL;
+
+WITH target AS (
+  SELECT embedding
+  FROM `book-recommendations-456120.book_recs.book_embeddings`
+  WHERE (
+    (target_isbn IS NOT NULL AND isbn_10 = target_isbn) OR
+    (target_title IS NOT NULL AND LOWER(title) = LOWER(target_title)) OR
+    (target_authors IS NOT NULL AND LOWER(authors) = LOWER(target_authors)) OR
+    (target_grade IS NOT NULL AND grade = target_grade) OR
+    (target_keyword IS NOT NULL AND (
+      LOWER(title) LIKE CONCAT('%', LOWER(target_keyword), '%') OR
+      LOWER(authors) LIKE CONCAT('%', LOWER(target_keyword), '%') OR
+      LOWER(description) LIKE CONCAT('%', LOWER(target_keyword), '%')
+    ))
+  )
+  LIMIT 1
+),
+
+scored AS (
+  SELECT
+    b2.isbn_10,
+    b2.title,
+    b2.authors,
+    b2.grade,
+    (
+      SELECT SUM(e1 * e2)
+      FROM UNNEST(b2.embedding) AS e1 WITH OFFSET i
+      JOIN UNNEST(target.embedding) AS e2 WITH OFFSET j
+      ON i = j
+    ) /
+    (
+      SQRT((SELECT SUM(POW(val, 2)) FROM UNNEST(b2.embedding) AS val)) *
+      SQRT((SELECT SUM(POW(val2, 2)) FROM UNNEST(target.embedding) AS val2))
+    ) AS similarity
+  FROM `book-recommendations-456120.book_recs.book_embeddings` b2, target
+  WHERE b2.embedding IS NOT NULL
+    AND (
+      target_isbn IS NULL OR b2.isbn_10 != target_isbn
+    )
+)
+
+SELECT *
+FROM scored
+ORDER BY similarity DESC
+LIMIT 10;
+```
+
+35.  update app.py and replace the recommendations by book bigquery endpoint
+```
+from fastapi import Query
+from google.cloud import bigquery
+from fastapi import FastAPI, HTTPException
+from typing import Optional
+
+@app.get("/recommendations/by-metadata")
+def recommend_by_metadata(
+    isbn_10: Optional[str] = Query(None),
+    title: Optional[str] = Query(None),
+    authors: Optional[str] = Query(None),
+    grade: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(None),
+    limit: int = Query(10, description="Number of recommendations to return")
+):
+    try:
+        client = bigquery.Client()
+
+        filters = []
+        if isbn_10:
+            filters.append(f"LOWER(isbn_10) = LOWER(@isbn_10)")
+        if title:
+            filters.append(f"LOWER(REGEXP_REPLACE(title, r'[^a-zA-Z0-9]', '')) = LOWER(REGEXP_REPLACE(@title, r'[^a-zA-Z0-9]', ''))")
+        if authors:
+            filters.append(f"LOWER(REGEXP_REPLACE(authors, r'[^a-zA-Z0-9]', '')) = LOWER(REGEXP_REPLACE(@authors, r'[^a-zA-Z0-9]', ''))")
+        if grade:
+            filters.append(f"grade = @grade")
+        if keyword:
+            filters.append(
+                """(
+                    LOWER(title) LIKE CONCAT('%', LOWER(@keyword), '%') OR
+                    LOWER(authors) LIKE CONCAT('%', LOWER(@keyword), '%') OR
+                    LOWER(description) LIKE CONCAT('%', LOWER(@keyword), '%')
+                )"""
+            )
+
+        if not filters:
+            raise HTTPException(status_code=400, detail="At least one filter must be provided.")
+
+        where_clause = " AND ".join(filters)
+
+        query = f"""
+        WITH target AS (
+            SELECT embedding
+            FROM `book-recommendations-456120.book_recs.book_embeddings`
+            WHERE {where_clause}
+            LIMIT 1
+        ),
+        scored AS (
+            SELECT
+                b2.isbn_10,
+                b2.title,
+                b2.authors,
+                b2.grade,
+                (
+                    SELECT SUM(e1 * e2)
+                    FROM UNNEST(b2.embedding) AS e1 WITH OFFSET i
+                    JOIN UNNEST(target.embedding) AS e2 WITH OFFSET j
+                    ON i = j
+                ) /
+                (
+                    SQRT((SELECT SUM(POW(val, 2)) FROM UNNEST(b2.embedding) AS val)) *
+                    SQRT((SELECT SUM(POW(val2, 2)) FROM UNNEST(target.embedding) AS val2))
+                ) AS similarity
+            FROM `book-recommendations-456120.book_recs.book_embeddings` b2, target
+            WHERE b2.embedding IS NOT NULL
+        )
+        SELECT *
+        FROM scored
+        ORDER BY similarity DESC
+        LIMIT @limit
+        """
+
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("isbn_10", "STRING", isbn_10),
+                bigquery.ScalarQueryParameter("title", "STRING", title),
+                bigquery.ScalarQueryParameter("authors", "STRING", authors),
+                bigquery.ScalarQueryParameter("grade", "STRING", grade),
+                bigquery.ScalarQueryParameter("keyword", "STRING", keyword),
+                bigquery.ScalarQueryParameter("limit", "INT64", limit),
+            ]
+        )
+
+        job = client.query(query, job_config=job_config)
+        results = job.result()
+        return [dict(row) for row in results]
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+36. reload the app
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+
+37. create a json file for the bigquery table named book_embeddings_schema.json
+```
+[
+    { "name": "isbn_10", "type": "STRING", "mode": "NULLABLE" },
+    { "name": "title", "type": "STRING", "mode": "NULLABLE" },
+    { "name": "authors", "type": "STRING", "mode": "NULLABLE" },
+    { "name": "grade", "type": "STRING", "mode": "NULLABLE" },
+    { "name": "embedding", "type": "FLOAT64", "mode": "REPEATED" },
+    { "name": "description", "type": "STRING", "mode": "NULLABLE" }
+  ]
+```
+38. update it in shell
+```
+bq update \
+  --table \
+  book-recommendations-456120:book_recs.book_embeddings \
+  book_embeddings_schema.json
+```
+
+# Create the Vertex AI chatbox
+1. install in shell if not already installed
+```
+pip install google-cloud-aiplatform
+```
+
+2. in Editor, create a chatbot.py file in book-api
+```
+# chatbot.py
+import vertexai
+from vertexai.language_models import ChatModel, InputOutputTextPair
+
+vertexai.init(
+    project="book-recommendations-456120", 
+    location="us-central1"
+)
+
+chat_model = ChatModel.from_pretrained("chat-bison@002")
+
+chat = chat_model.start_chat(
+    context="You are a friendly book assistant. Recommend books based on what the user says. Use genres, topics, and reading level if given.",
+)
+
+def ask_chatbot(prompt: str) -> str:
+    response = chat.send_message(prompt)
+    return response.text
+```
+
+3. add to app.py
+```
+## AI Chatbot
+
+from chatbot import ask_chatbot
+from fastapi import Body
+
+@app.post("/chat")
+def chat_with_user(message: str = Body(..., embed=True)):
+    try:
+        response = ask_chatbot(message)
+        return {"response": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+4. reload the app
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+
+5. PAUSE: ran into issue with vertex ai, awaiting feeback
+
+#####
+
+# Add feedback/reaction endpoint for users interacting with recommendations
+1. switch to db
+```
+psql -h 127.0.0.1 -U postgres -d book_recommendations_db
+```
+
+2. create table for feedback
+```
+CREATE TABLE recommendation_feedback (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(user_id),
+    isbn_10 TEXT,
+    feedback TEXT CHECK (feedback IN ('like', 'dislike', 'interested')),
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+3. add feedback endpoint to app.py
+```
+## Feeback endpoint
+from datetime import datetime
+from google.cloud import bigquery
+
+class Feedback(BaseModel):
+    user_id: int
+    isbn_10: str
+    feedback: str  # 'like', 'dislike', 'interested'
+
+@app.post("/feedback")
+def submit_feedback(entry: Feedback):
+    if entry.feedback not in ['like', 'dislike', 'interested']:
+        raise HTTPException(status_code=400, detail="Invalid feedback type.")
+
+    # Store feedback in PostgreSQL
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO recommendation_feedback (user_id, isbn_10, feedback)
+            VALUES (%s, %s, %s)
+        """, (entry.user_id, entry.isbn_10, entry.feedback))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"PostgreSQL error: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
+
+    # Also update BigQuery thumbs_up/thumbs_down
+    try:
+        if entry.feedback in ['like', 'dislike']:
+            bq_client = bigquery.Client()
+            field = "thumbs_up" if entry.feedback == "like" else "thumbs_down"
+
+            query = f"""
+                UPDATE `book-recommendations-456120.book_recs.book_embeddings`
+                SET {field} = IFNULL({field}, 0) + 1
+                WHERE isbn_10 = @isbn_10
+            """
+
+            job = bq_client.query(query, job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("isbn_10", "STRING", entry.isbn_10)
+                ]
+            ))
+            job.result()
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery error: {str(e)}")
+
+    return {"message": "Feedback submitted successfully."}
+```
+
+4. update book_embeddings_schema.json
+```
+[
+    {"name": "isbn_10", "type": "STRING"},
+    {"name": "title", "type": "STRING"},
+    {"name": "authors", "type": "STRING"},
+    {"name": "description", "type": "STRING"},
+    {"name": "grade", "type": "STRING"},
+    {"name": "embedding", "type": "FLOAT64", "mode": "REPEATED"},
+    {"name": "thumbs_up", "type": "INTEGER"},
+    {"name": "thumbs_down", "type": "INTEGER"}
+  ]
+```
+
+5. update bigquery table in shell
+```
+bq update \
+  --table book-recommendations-456120:book_recs.book_embeddings \
+  ./book_embeddings_schema.json
+```
+
+6. update the sql query (BigQuery >> Studio >> project name >> queries (select the one you've been using)
+```
+DECLARE target_isbn STRING DEFAULT "0375866116";
+DECLARE target_title STRING DEFAULT NULL;
+DECLARE target_authors STRING DEFAULT NULL;
+DECLARE target_grade STRING DEFAULT NULL;
+DECLARE target_keyword STRING DEFAULT NULL;
+
+WITH target AS (
+  SELECT embedding
+  FROM `book-recommendations-456120.book_recs.book_embeddings`
+  WHERE (
+    (target_isbn IS NOT NULL AND isbn_10 = target_isbn) OR
+    (target_title IS NOT NULL AND LOWER(title) = LOWER(target_title)) OR
+    (target_authors IS NOT NULL AND LOWER(authors) = LOWER(target_authors)) OR
+    (target_grade IS NOT NULL AND grade = target_grade) OR
+    (target_keyword IS NOT NULL AND (
+      LOWER(title) LIKE CONCAT('%', LOWER(target_keyword), '%') OR
+      LOWER(authors) LIKE CONCAT('%', LOWER(target_keyword), '%') OR
+      LOWER(description) LIKE CONCAT('%', LOWER(target_keyword), '%')
+    ))
+  )
+  LIMIT 1
+),
+
+scored AS (
+  SELECT
+    b2.isbn_10,
+    b2.title,
+    b2.authors,
+    b2.grade,
+    (
+      SELECT SUM(e1 * e2)
+      FROM UNNEST(b2.embedding) AS e1 WITH OFFSET i
+      JOIN UNNEST(target.embedding) AS e2 WITH OFFSET j
+      ON i = j
+    ) /
+    (
+      SQRT((SELECT SUM(POW(val, 2)) FROM UNNEST(b2.embedding) AS val)) *
+      SQRT((SELECT SUM(POW(val2, 2)) FROM UNNEST(target.embedding) AS val2))
+    ) AS similarity
+  FROM `book-recommendations-456120.book_recs.book_embeddings` b2, target
+  WHERE b2.embedding IS NOT NULL
+    AND (
+      target_isbn IS NULL OR b2.isbn_10 != target_isbn
+    )
+)
+
+SELECT *
+FROM scored
+ORDER BY similarity DESC
+LIMIT 10;
+```
+
+7. in app.py update @app.get("/recommendations/by-metadata") to include thumbsUp and thumbs_down
+```
+ # everything above this stays the same       
+            SELECT
+                b2.isbn_10,
+                b2.title,
+                b2.authors,
+                b2.thumbs_up,
+                b2.thumbs_down,
+                b2.grade,
+# everything below this stays the same
+```
+
+8. reload the app in shell
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+
+# Build the Front End
+
+1. make a static folder inside book-api
+```
+mkdir static
+```
+
+2. in Editor, select static folder and create file index.html
+
+3. inside index.html add code
+```
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Book Recommendation App</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f9f9f9; margin: 0; padding: 20px; }
+        h1, h2 { color: #333; }
+        .section { margin-bottom: 40px; }
+        input, button, select { padding: 8px; margin: 5px; font-size: 16px; }
+        .book { border: 1px solid #ccc; border-radius: 8px; background: #fff; padding: 10px; margin: 10px 0; display: flex; align-items: flex-start; }
+        .book img { height: 100px; margin-right: 15px; }
+        .book a { display: inline-block; margin-top: 10px; color: blue; text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <h1>Book Recommender</h1>
+
+    <!-- Login Section -->
+    <div class="section">
+        <h2>Login</h2>
+        <input type="text" id="username" placeholder="Username">
+        <input type="email" id="email" placeholder="Email">
+        <button onclick="loginUser()">Login / Register</button>
+    </div>
+
+    <!-- Search Section -->
+    <div class="section">
+        <h2>Search Books</h2>
+        <input type="text" id="searchQuery" placeholder="Title, Author, or Keyword">
+        <button onclick="searchBooks()">Search</button>
+        <div id="searchResults"></div>
+    </div>
+
+    <!-- Recommendation Section -->
+    <div class="section">
+        <h2>Get Recommendations</h2>
+        <button onclick="getRecommendations()">Get Recommendations</button>
+        <div id="recommendations"></div>
+    </div>
+
+    <script>
+        let currentUserId = null;
+
+        function loginUser() {
+            const username = document.getElementById('username').value;
+            const email = document.getElementById('email').value;
+            fetch('/users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, email })
+            })
+            .then(res => res.json())
+            .then(data => {
+                currentUserId = data[0];
+                alert('Logged in as ' + username);
+            });
+        }
+
+        function searchBooks() {
+            const query = document.getElementById('searchQuery').value;
+            fetch(`/books?title=${encodeURIComponent(query)}`)
+                .then(res => res.json())
+                .then(books => {
+                    const resultsDiv = document.getElementById('searchResults');
+                    resultsDiv.innerHTML = '';
+                    books.forEach(book => {
+                        const div = document.createElement('div');
+                        div.className = 'book';
+                        div.innerHTML = `
+                            <img src="${book.image_small || ''}" alt="cover">
+                            <div>
+                                <strong>${book.title}</strong><br>
+                                <em>${book.authors}</em><br>
+                                <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 5)">👍</button>
+                                <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 1)">👎</button><br>
+                                ${book.buy_link ? `<a href="${book.buy_link}" target="_blank">Buy</a>` : ''}
+                            </div>
+                        `;
+                        resultsDiv.appendChild(div);
+                    });
+                });
+        }
+
+        function rateBook(isbn_10, title, author, rating) {
+            if (!currentUserId) return alert('Please log in first.');
+            fetch('/user_books', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_id: currentUserId,
+                    isbn_10, title, author,
+                    rating: rating,
+                    status: 'completed'
+                })
+            })
+            .then(() => alert('Rating submitted!'));
+        }
+
+        function getRecommendations() {
+            if (!currentUserId) return alert('Please log in first.');
+            fetch(`/recommendations/${currentUserId}`)
+                .then(res => res.json())
+                .then(books => {
+                    const resultsDiv = document.getElementById('recommendations');
+                    resultsDiv.innerHTML = '';
+                    books.forEach(book => {
+                        const div = document.createElement('div');
+                        div.className = 'book';
+                        div.innerHTML = `
+                            <img src="" alt="cover">
+                            <div>
+                                <strong>${book.title}</strong><br>
+                                <em>${book.authors}</em><br>
+                                ${book.buy_link ? `<a href="${book.buy_link}" target="_blank">Buy</a>` : ''}
+                            </div>
+                        `;
+                        resultsDiv.appendChild(div);
+                    });
+                });
+        }
+    </script>
+</body>
+</html>
+```
+
+4. open app.py and add code chunk near top under app = FastAPI()
+```
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+# Serve static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Route for the homepage
+@app.get("/")
+def read_index():
+    return FileResponse("static/index.html")
+```
+
+5. rerun app
+```
+uvicorn app:app --host=0.0.0.0 --port=8080 --reload
+```
+ 
+# Cloud Run
+
+1. in book-api in shell, copy all current dependencies to a new file (it will create the file)
+```
+pip freeze > requirements.txt
+```
+
+2. create a Docker file
+```
+# enter into shell
+touch Dockerfile
+```
+
+3. open Editor, select Dockerfile, add code
+```
+# Use official Python image
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements and install dependencies
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy rest of the app (code, templates, etc.)
+COPY . .
+
+# Expose port
+EXPOSE 8080
+
+# Run the FastAPI app with uvicorn
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+4. use shell terminal to deploy to Cloud Run
+```
+gcloud builds submit --tag gcr.io/book-recommendations-456120/book-api
+gcloud run deploy book-api \
+  --image gcr.io/book-recommendations-456120/book-api \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated
+```
+
+# Build user authenticaion and better security
