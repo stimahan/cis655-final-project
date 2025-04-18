@@ -3118,4 +3118,321 @@ curl -X GET "https://book-api-968113828557.us-central1.run.app//books?title=Cora
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
 
 ```
-15. 
+
+# pivoting to using Cloud Composer instaed of Vertex AI
+
+1. take Google Colab book api code and put it in file, adapting to use bucket. fetch_books_dag.py
+```
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from datetime import datetime, timedelta
+import requests
+import csv
+import time
+import os
+from google.cloud import storage
+
+API_KEY = "AIzaSyAF9e-dplvn7hy3ObmK60XV-cpht4pMeeY"
+GRADE_QUERIES = {
+    "K": "kindergarten books",
+    "1": "grade 1 books",
+    "2": "grade 2 books",
+    "3": "grade 3 books",
+    "4": "grade 4 books",
+    "5": "grade 5 books",
+    "6": "grade 6 books",
+    "7": "grade 7 books",
+    "8": "grade 8 books"
+}
+
+BUCKET_NAME = "k8-books-bucket"
+EXISTING_FILE = "books.csv"
+NEW_FILE = "k8_books_new.csv"
+
+
+def download_existing_books():
+    client = storage.Client()
+    bucket = client.bucket(BUCKET_NAME)
+    blob = bucket.blob(EXISTING_FILE)
+    blob.download_to_filename(EXISTING_FILE)
+    print(f"Downloaded {EXISTING_FILE} from {BUCKET_NAME}")
+
+def upload_new_books():
+    client = storage.Client()
+    bucket = client.bucket(BUCKET_NAME)
+    blob = bucket.blob(NEW_FILE)
+    blob.upload_from_filename(NEW_FILE)
+    print(f"Uploaded {NEW_FILE} to {BUCKET_NAME}")
+
+def fetch_books():
+    download_existing_books()
+
+    existing_identifiers = set()
+    with open(EXISTING_FILE, mode='r', encoding='utf-8') as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            title = row.get("title", "").strip().lower()
+            isbn_10 = row.get("isbn_10", "").strip()
+            isbn_13 = row.get("isbn_13", "").strip()
+            if title:
+                existing_identifiers.add(title)
+            if isbn_10:
+                existing_identifiers.add(isbn_10)
+            if isbn_13:
+                existing_identifiers.add(isbn_13)
+
+    def fetch_books_for_grade(query, grade):
+        book_data = []
+        url = (
+            f"https://www.googleapis.com/books/v1/volumes?"
+            f"q={query}&maxResults=40&printType=books&langRestrict=en&key={API_KEY}"
+        )
+        response = requests.get(url)
+        books = response.json().get("items", [])
+
+        for book in books:
+            info = book.get("volumeInfo", {})
+            sale = book.get("saleInfo", {})
+            access = book.get("accessInfo", {})
+
+            title = info.get("title", "").strip()
+            title_key = title.lower()
+
+            isbn_10 = ""
+            isbn_13 = ""
+            for identifier in info.get("industryIdentifiers", []):
+                if identifier["type"] == "ISBN_10":
+                    isbn_10 = identifier["identifier"]
+                elif identifier["type"] == "ISBN_13":
+                    isbn_13 = identifier["identifier"]
+
+            if (
+                title_key in existing_identifiers or
+                (isbn_10 and isbn_10 in existing_identifiers) or
+                (isbn_13 and isbn_13 in existing_identifiers)
+            ):
+                continue
+
+            authors = ", ".join(info.get("authors", []))
+            publisher = info.get("publisher", "")
+            published_date = info.get("publishedDate", "")
+            description = info.get("description", "")
+            page_count = info.get("pageCount", "")
+            categories = ", ".join(info.get("categories", []))
+            language = info.get("language", "")
+            reading_mode_text = info.get("readingModes", {}).get("text", "")
+            reading_mode_image = info.get("readingModes", {}).get("image", "")
+            image_small = info.get("imageLinks", {}).get("smallThumbnail", "")
+            image_large = info.get("imageLinks", {}).get("thumbnail", "")
+            country = sale.get("country", "")
+            list_price_amount = sale.get("listPrice", {}).get("amount", "")
+            list_price_currency = sale.get("listPrice", {}).get("currencyCode", "")
+            buy_link = sale.get("buyLink", "")
+            web_reader_link = access.get("webReaderLink", "")
+            embeddable = access.get("embeddable", "")
+
+            book_data.append([
+                title, authors, publisher, published_date, description,
+                isbn_10, isbn_13, reading_mode_text, reading_mode_image,
+                page_count, categories, maturity_rating, image_small,
+                image_large, language, country, list_price_amount,
+                list_price_currency, buy_link, web_reader_link,
+                embeddable, grade
+            ])
+
+            existing_identifiers.update([title_key, isbn_10, isbn_13])
+
+        return book_data
+
+    all_new_books = []
+    for grade, query in GRADE_QUERIES.items():
+        print(f"Searching for Grade {grade} books...")
+        all_new_books.extend(fetch_books_for_grade(query, grade))
+        time.sleep(10)  # Throttle to avoid hitting API limits
+
+    headers = [
+        "title", "authors", "publisher", "published_date", "description",
+        "isbn_10", "isbn_13", "reading_mode_text", "reading_mode_image",
+        "page_count", "categories", "image_small",
+        "image_large", "language", "sale_country", "list_price_amount",
+        "list_price_currency", "buy_link", "web_reader_link", "embeddable", "grade"
+    ]
+
+    with open(NEW_FILE, mode='w', newline='', encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerow(headers)
+        writer.writerows(all_new_books)
+
+    print(f"Saved {len(all_new_books)} books to {NEW_FILE}")
+    upload_new_books()
+
+
+# Define the DAG
+with DAG(
+    "fetch_books_pipeline",
+    schedule_interval="@daily",
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    default_args={"retries": 1, "retry_delay": timedelta(minutes=5)}
+) as dag:
+    fetch_books_task = PythonOperator(
+        task_id="fetch_books",
+        python_callable=fetch_books
+    )
+
+```
+
+2. grant role in shell
+```
+gcloud projects add-iam-policy-binding book-recommendations-456120 \
+  --member="serviceAccount:service-968113828557@cloudcomposer-accounts.iam.gserviceaccount.com" \
+  --role="roles/composer.ServiceAgentV2Ext"
+```
+
+3. create Composer environment
+```
+# takes awhile to work (up to 30 min ish)
+gcloud composer environments create book-data-pipeline \
+  --location=us-central1 \
+  --image-version=composer-2.12.0-airflow-2.10.2 \
+  --environment-size=small
+```
+
+4. when done, find bucket name
+```
+gcloud composer environments describe book-data-pipeline \
+  --location=us-central1 \
+  --format="value(config.dagGcsPrefix)"
+
+# example output (use in next line):
+# gs://us-central1-book-data-pipel-122da488-bucket/dags
+```
+
+5. upload DAG to Composer
+```
+gsutil cp fetch_books_dag.py gs://us-central1-book-data-pipel-122da488-bucket/dags
+```
+
+6. Run DAG: search Cloud Composer >> Environment >> select the right environemnt >> click AirFlow UI >> find your DAG (takes a coupke minutes to show up >> make sure toggled on >> click play button to run
+
+7. clean up the csv by creating file clean_books_csv.py
+```
+import csv
+from google.cloud import storage
+
+BUCKET_NAME = "k8-books-bucket"
+SOURCE_FILE = "k8_books_new.csv"
+TARGET_FILE = "k8_books_clean.csv"
+
+# Expected columns (22)
+COLUMNS = [
+    "title", "authors", "publisher", "published_date", "description",
+    "isbn_10", "isbn_13", "reading_mode_text", "reading_mode_image", "page_count",
+    "categories", "image_small", "image_large", "language",
+    "sale_country", "list_price_amount", "list_price_currency",
+    "buy_link", "web_reader_link", "embeddable", "grade"
+]
+
+client = storage.Client()
+bucket = client.bucket(BUCKET_NAME)
+
+# Download the file
+blob = bucket.blob(SOURCE_FILE)
+blob.download_to_filename("temp_books.csv")
+
+# Clean and save locally
+with open("temp_books.csv", "r", encoding="utf-8") as infile, open("k8_books_clean.csv", "w", encoding="utf-8", newline='') as outfile:
+    reader = csv.reader(infile)
+    writer = csv.writer(outfile)
+    writer.writerow(COLUMNS)
+
+    for row in reader:
+        if len(row) == 23:  # has 'id' column
+            row = row[1:]
+        if len(row) == 22 and row[0].strip():  # must have a title
+            writer.writerow(row)
+
+# Upload cleaned version
+clean_blob = bucket.blob("k8_books_clean.csv")
+clean_blob.upload_from_filename("k8_books_clean.csv")
+
+print("Cleaned file uploaded as k8_books_clean.csv")
+```
+
+```
+# in shell
+python3 clean_books_csv.py
+
+# confirm in bucket
+gsutil ls gs://k8-books-bucket/k8_books_clean.csv
+```
+
+8.  enable service agent
+```
+gcloud services enable sqladmin.googleapis.com
+
+# create an agent
+gcloud iam service-accounts create cloudsql-uploader \
+  --description="Used by Cloud SQL to read CSVs" \
+  --display-name="Cloud SQL Uploader"
+
+# grant permission
+gsutil iam ch \
+  serviceAccount:cloudsql-uploader@book-recommendations-456120.iam.gserviceaccount.com:objectViewer \
+  gs://k8-books-bucket
+
+```
+
+9.  import to SQL
+```
+gcloud sql import csv book-recs-db \
+  gs://k8-books-bucket/k8_books_clean.csv \
+  --database=book_recommendations_d \
+  --table=books \
+  --columns="title,authors,publisher,published_date,description,isbn_10,isbn_13,reading_mode_text,reading_mode_image,page_count,categories,image_small,image_large,language,sale_country,list_price_amount,list_price_currency,buy_link,web_reader_link,embeddable,grade" \
+  --project=book-recommendations-456120
+```
+10.  fixing issue
+```
+gsutil cp gs://k8-books-bucket/k8_books_clean.csv .
+awk 'BEGIN{FS=OFS=","} NR==1{$1="id,"$1} NR>1{$1=","$1} 1' k8_books_clean.csv > k8_books_with_id.csv
+
+gsutil cp k8_books_with_id.csv gs://k8-books-bucket/
+
+```
+
+# skip merging the tables and go back to fixing the front end
+1. fix db.py (host was not connecting to right place)
+```
+import psycopg2
+import os
+
+def get_db_connection():
+    return psycopg2.connect(
+        dbname=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        host=f"/cloudsql/{os.environ['INSTANCE_CONNECTION_NAME']}"  # Cloud SQL socket path
+    )
+```
+
+2. rebuild and push Docker
+```
+docker build -t gcr.io/book-recommendations-456120/book-api .
+docker push gcr.io/book-recommendations-456120/book-api
+```
+
+3. redeploy to Cloud Run
+```
+gcloud run deploy book-api \
+  --image gcr.io/book-recommendations-456120/book-api \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --add-cloudsql-instances=book-recommendations-456120:us-central1:book-recs-db \
+  --set-env-vars DB_NAME=book_recommendations_db,DB_USER=postgres,DB_PASSWORD=stimac-cis655-final,INSTANCE_CONNECTION_NAME=book-recommendations-456120:us-central1:book-recs-db \
+  --port 8080
+```
+4. YAY it works now
+
+5. 
