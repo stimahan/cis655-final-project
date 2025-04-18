@@ -2853,4 +2853,229 @@ function searchBooks() {
 
 
 ```
-12. Currently doing some de-bugging of front end. need to post updated files
+12. Currently doing some de-bugging of front end. need to post updated files. current index.html below
+
+```
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Book Recommendation App</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f9f9f9;
+      margin: 0;
+      padding: 20px;
+    }
+    h1, h2 {
+      color: #333;
+    }
+    .section {
+      margin-bottom: 40px;
+    }
+    input, button, select {
+      padding: 8px;
+      margin: 5px;
+      font-size: 16px;
+    }
+    .book {
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      background: #fff;
+      padding: 10px;
+      margin: 10px 0;
+      display: flex;
+      align-items: flex-start;
+    }
+    .book img {
+      height: 100px;
+      margin-right: 15px;
+    }
+    .book a {
+      display: inline-block;
+      margin-top: 10px;
+      color: blue;
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <h1>Book Recommender</h1>
+
+  <!-- Login Section -->
+  <div class="section">
+    <h2>Login</h2>
+    <input type="text" id="username" placeholder="Username">
+    <input type="email" id="email" placeholder="Email">
+    <button onclick="loginUser()">Login / Register</button>
+  </div>
+
+  <!-- Search Section -->
+  <div class="section">
+    <h2>Search Books</h2>
+    <input type="text" id="searchTitle" placeholder="Title">
+    <input type="text" id="searchAuthors" placeholder="Author">
+    <input type="text" id="searchKeyword" placeholder="Keyword (description)">
+    <select id="searchGrade">
+      <option value="">Grade</option>
+      <option value="K">K</option>
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="3">3</option>
+      <option value="4">4</option>
+      <option value="5">5</option>
+      <option value="6">6</option>
+      <option value="7">7</option>
+      <option value="8">8</option>
+    </select>
+    <button onclick="searchBooks()">Search</button>
+    <div id="searchResults"></div>
+  </div>
+
+  <!-- Metadata Recommendation Section -->
+  <div class="section">
+    <h2>Find Book Recommendations</h2>
+    <input type="text" id="recTitle" placeholder="Title">
+    <input type="text" id="recAuthors" placeholder="Author(s)">
+    <input type="text" id="recIsbn" placeholder="ISBN-10">
+    <input type="text" id="recKeyword" placeholder="Keyword">
+    <select id="recGrade">
+      <option value="">Select Grade</option>
+      <option value="K">K</option>
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="3">3</option>
+      <option value="4">4</option>
+      <option value="5">5</option>
+      <option value="6">6</option>
+      <option value="7">7</option>
+      <option value="8">8</option>
+    </select>
+    <button onclick="getMetadataRecommendations()">Get Recommendations</button>
+    <div id="recommendations"></div>
+  </div>
+
+  <script>
+    let currentUserId = null;
+
+    function loginUser() {
+      const username = document.getElementById('username').value;
+      const email = document.getElementById('email').value;
+
+      fetch('/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, email })
+      })
+      .then(res => res.json())
+      .then(data => {
+        currentUserId = data.user_id;
+        alert('Logged in as ' + data.username);
+      })
+      .catch(error => {
+        console.error("Login failed:", error);
+        alert("Login failed. Please try again.");
+      });
+    }
+
+    function searchBooks() {
+      const title = document.getElementById('searchTitle').value;
+      const authors = document.getElementById('searchAuthors').value;
+      const keyword = document.getElementById('searchKeyword').value;
+      const grade = document.getElementById('searchGrade').value;
+
+      const params = new URLSearchParams();
+      if (title) params.append('title', title);
+      if (authors) params.append('authors', authors);
+      if (keyword) params.append('description', keyword);
+      if (grade) params.append('grade', grade);
+
+      fetch(`/books?${params.toString()}`)
+        .then(res => {
+          if (!res.ok) throw new Error("Search failed");
+          return res.json();
+        })
+        .then(books => {
+          const resultsDiv = document.getElementById('searchResults');
+          resultsDiv.innerHTML = '';
+          books.forEach(book => {
+            const div = document.createElement('div');
+            div.className = 'book';
+            div.innerHTML = `
+              <img src="${book.image_small || '/static/placeholder.png'}" alt="cover">
+              <div>
+                <strong>${book.title}</strong><br>
+                <em>${book.authors}</em><br>
+                <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'like')">👍</button>
+                <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'dislike')">👎</button><br>
+                ${book.buy_link ? `<a href="${book.buy_link}" target="_blank">Buy</a>` : ''}
+              </div>
+            `;
+            resultsDiv.appendChild(div);
+          });
+        })
+        .catch(error => {
+          console.error("Search error:", error);
+          alert("Search failed.");
+        });
+    }
+
+    function getMetadataRecommendations() {
+      const title = document.getElementById('recTitle').value;
+      const authors = document.getElementById('recAuthors').value;
+      const isbn_10 = document.getElementById('recIsbn').value;
+      const keyword = document.getElementById('recKeyword').value;
+      const grade = document.getElementById('recGrade').value;
+
+      const params = new URLSearchParams();
+      if (title) params.append('title', title);
+      if (authors) params.append('authors', authors);
+      if (isbn_10) params.append('isbn_10', isbn_10);
+      if (keyword) params.append('keyword', keyword);
+      if (grade) params.append('grade', grade);
+
+      fetch(`/recommendations/by-metadata?${params.toString()}`)
+        .then(res => res.json())
+        .then(books => {
+          const resultsDiv = document.getElementById('recommendations');
+          resultsDiv.innerHTML = '';
+          books.forEach(book => {
+            const div = document.createElement('div');
+            div.className = 'book';
+            div.innerHTML = `
+              <img src="${book.image_small || '/static/placeholder.png'}" alt="cover">
+              <div>
+                <strong>${book.title}</strong><br>
+                <em>${book.authors}</em><br>
+                <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'like')">👍</button>
+                <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'dislike')">👎</button><br>
+                ${book.buy_link ? `<a href="${book.buy_link}" target="_blank">Buy</a>` : ''}
+              </div>
+            `;
+            resultsDiv.appendChild(div);
+          });
+        })
+        .catch(error => {
+          alert("Recommendation failed.");
+          console.error(error);
+        });
+    }
+
+    function rateBook(isbn_10, title, author, feedback) {
+      if (!currentUserId) return alert('Please log in first.');
+      fetch('/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: currentUserId, isbn_10, feedback })
+      })
+      .then(() => alert('Feedback submitted!'))
+      .catch(error => {
+        console.error('Feedback failed:', error);
+      });
+    }
+  </script>
+</body>
+</html>
+
+```
