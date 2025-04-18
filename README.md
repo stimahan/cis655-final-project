@@ -2853,7 +2853,7 @@ function searchBooks() {
 
 
 ```
-12. Currently doing some de-bugging of front end. need to post updated files. current index.html below
+12. current index.html below
 
 ```
 <!DOCTYPE html>
@@ -3079,3 +3079,43 @@ function searchBooks() {
 </html>
 
 ```
+
+13. update app.py to allow user reviews
+```
+class Review(BaseModel):
+    user_id: int
+    isbn_10: Optional[str]
+    title: str
+    author: str
+    rating: Optional[int]
+    notes: Optional[str]
+    status: Optional[str] = "completed"
+    reviewed_at: Optional[str] = None  # If not provided, set it to now
+
+@app.post("/review", dependencies=[Depends(get_current_user)])
+def submit_review(entry: Review):
+    try:
+        # If no timestamp is given, add it
+        if not entry.reviewed_at:
+            entry.reviewed_at = datetime.utcnow().isoformat()
+
+        publisher = pubsub_v1.PublisherClient()
+        topic_path = publisher.topic_path("book-recommendations-456120", "user-reviews")
+
+        payload = json.dumps(entry.dict()).encode("utf-8")
+        publisher.publish(topic_path, payload)
+
+        return {"message": "Review submitted successfully."}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error submitting review: {str(e)}")
+
+```
+
+14. fix review on front end
+```
+curl -X GET "https://book-api-968113828557.us-central1.run.app//books?title=Coraline" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+
+```
+15. 
