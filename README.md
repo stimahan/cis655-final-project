@@ -2439,3 +2439,418 @@ gcloud run deploy book-api \
 ```
 
 # Build user authenticaion and better security
+
+1. add to requirements.txt
+```
+python-jose
+passlib[bcrypt]
+```
+
+2. run in shell
+```
+pip install -r requirements.txt
+```
+
+3. in Editor, create auth.py in book-api for user authentication
+
+4. put the code in auth.py to handle registration, login, and utilities for users
+```
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
+from typing import Optional
+from app import get_db_connection
+
+router = APIRouter()
+
+# Secret key and algorithm
+SECRET_KEY = "your-secret-key"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+class User(BaseModel):
+    username: str
+    email: str
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+@router.post("/register")
+def register(user: User):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM users WHERE username = %s OR email = %s", (user.username, user.email))
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail="Username or email already exists")
+
+        hashed_password = get_password_hash(user.password)
+        cur.execute(
+            "INSERT INTO users (username, email, hashed_password) VALUES (%s, %s, %s)",
+            (user.username, user.email, hashed_password)
+        )
+        conn.commit()
+        return {"message": "User registered successfully"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+@router.post("/login", response_model=Token)
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT user_id, username, email, hashed_password FROM users WHERE username = %s", (form_data.username,))
+        user = cur.fetchone()
+        if not user or not verify_password(form_data.password, user[3]):
+            raise HTTPException(status_code=400, detail="Invalid credentials")
+
+        access_token = create_access_token(data={"sub": user[1]})
+        return {"access_token": access_token, "token_type": "bearer"}
+    finally:
+        cur.close()
+        conn.close()
+```
+
+5. update `user` table
+```
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+
+ALTER TABLE users
+ADD COLUMN password TEXT,
+ADD COLUMN hashed_password TEXT;
+```
+
+6. update app.py near the top below FastAPI
+```
+from fastapi import Depends
+from auth import router as auth_router, verify_token
+from auth import router as auth_router
+
+app.include_router(auth_router)
+```
+
+```
+# update these lines in app.py to add authentication
+
+@app.get("/user_books/{user_id}", dependencies=[Depends(verify_token)])
+
+@app.post("/user_books", dependencies=[Depends(verify_token)])
+
+@app.get("/recommendations/for-user/{user_id}", dependencies=[Depends(verify_token)])
+
+@app.post("/feedback", dependencies=[Depends(verify_token)])
+
+@app.post("/books", response_model=Book, dependencies=[Depends(verify_token)])
+
+@app.put("/books/{isbn}", response_model=Book, dependencies=[Depends(verify_token)])
+
+@app.delete("/books/{isbn}", dependencies=[Depends(verify_token)])
+```
+
+7. update index.html to include better search options and feedback input
+```
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Book Recommendation App</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f9f9f9;
+            margin: 0;
+            padding: 20px;
+        }
+        h1, h2 {
+            color: #333;
+        }
+        .section {
+            margin-bottom: 40px;
+        }
+        input, button, select {
+            padding: 8px;
+            margin: 5px;
+            font-size: 16px;
+        }
+        .book {
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            background: #fff;
+            padding: 10px;
+            margin: 10px 0;
+            display: flex;
+            align-items: flex-start;
+        }
+        .book img {
+            height: 100px;
+            margin-right: 15px;
+        }
+        .book a {
+            display: inline-block;
+            margin-top: 10px;
+            color: blue;
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <h1>Book Recommender</h1>
+
+    <!-- Login Section -->
+    <div class="section">
+        <h2>Login</h2>
+        <input type="text" id="username" placeholder="Username">
+        <input type="email" id="email" placeholder="Email">
+        <button onclick="loginUser()">Login / Register</button>
+    </div>
+
+    <!-- Search Section -->
+    <div class="section">
+        <h2>Search Books (Basic)</h2>
+        <input type="text" id="searchQuery" placeholder="Title, Author, or Keyword">
+        <button onclick="searchBooks()">Search</button>
+        <div id="searchResults"></div>
+    </div>
+
+    <!-- Smart Recommendation Section -->
+    <div class="section">
+        <h2>Find Book Recommendations</h2>
+        <input type="text" id="recTitle" placeholder="Title">
+        <input type="text" id="recAuthors" placeholder="Author(s)">
+        <input type="text" id="recIsbn" placeholder="ISBN-10">
+        <input type="text" id="recKeyword" placeholder="Keyword">
+        <select id="recGrade">
+            <option value="">Select Grade</option>
+            <option value="K">K</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="7">7</option>
+            <option value="8">8</option>
+        </select>
+        <button onclick="getMetadataRecommendations()">Get Recommendations</button>
+        <div id="recommendations"></div>
+    </div>
+
+    <script>
+        let currentUserId = null;
+
+        function loginUser() {
+            const username = document.getElementById('username').value;
+            const email = document.getElementById('email').value;
+            fetch('/users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, email })
+            })
+            .then(res => res.json())
+            .then(data => {
+                currentUserId = data[0];
+                alert('Logged in as ' + username);
+            });
+        }
+
+        function searchBooks() {
+            const query = document.getElementById('searchQuery').value;
+            fetch(`/books?title=${encodeURIComponent(query)}`)
+                .then(res => res.json())
+                .then(books => {
+                    const resultsDiv = document.getElementById('searchResults');
+                    resultsDiv.innerHTML = '';
+                    books.forEach(book => {
+                        const div = document.createElement('div');
+                        div.className = 'book';
+                        div.innerHTML = `
+                            <img src="${book.image_small || ''}" alt="cover">
+                            <div>
+                                <strong>${book.title}</strong><br>
+                                <em>${book.authors}</em><br>
+                                <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'like')">👍</button>
+                                <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'dislike')">👎</button><br>
+                                ${book.buy_link ? `<a href="${book.buy_link}" target="_blank">Buy</a>` : ''}
+                            </div>
+                        `;
+                        resultsDiv.appendChild(div);
+                    });
+                });
+        }
+
+        function rateBook(isbn_10, title, author, feedback) {
+            if (!currentUserId) return alert('Please log in first.');
+            fetch('/feedback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: currentUserId, isbn_10, feedback })
+            })
+            .then(() => alert('Feedback submitted!'));
+        }
+
+        function getMetadataRecommendations() {
+            const title = document.getElementById('recTitle').value;
+            const authors = document.getElementById('recAuthors').value;
+            const isbn_10 = document.getElementById('recIsbn').value;
+            const keyword = document.getElementById('recKeyword').value;
+            const grade = document.getElementById('recGrade').value;
+
+            const params = new URLSearchParams();
+            if (title) params.append('title', title);
+            if (authors) params.append('authors', authors);
+            if (isbn_10) params.append('isbn_10', isbn_10);
+            if (keyword) params.append('keyword', keyword);
+            if (grade) params.append('grade', grade);
+
+            fetch(`/recommendations/by-metadata?${params.toString()}`)
+                .then(res => res.json())
+                .then(books => {
+                    const resultsDiv = document.getElementById('recommendations');
+                    resultsDiv.innerHTML = '';
+                    books.forEach(book => {
+                        const div = document.createElement('div');
+                        div.className = 'book';
+                        div.innerHTML = `
+                            <img src="${book.image_small || ''}" alt="cover">
+                            <div>
+                                <strong>${book.title}</strong><br>
+                                <em>${book.authors}</em><br>
+                                <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'like')">👍</button>
+                                <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'dislike')">👎</button><br>
+                                ${book.buy_link ? `<a href="${book.buy_link}" target="_blank">Buy</a>` : ''}
+                            </div>
+                        `;
+                        resultsDiv.appendChild(div);
+                    });
+                })
+                .catch(error => {
+                    alert("Something went wrong with the recommendation request.");
+                    console.error(error);
+                });
+        }
+    </script>
+</body>
+</html>
+```
+
+8. ran into connection error. resolve by:
+```
+# create db.py file in book-api
+import psycopg2
+import os
+
+def get_db_connection():
+    return psycopg2.connect(
+        dbname="book_recommendations_db",
+        user="postgres",
+        password="stimac-cis655-final",
+        host="127.0.0.1",
+        port="5432"
+    )
+
+# in app.py replace get_db_connection() with
+from db import get_db_connection
+
+# in auth.py add
+from fastapi.security import OAuth2PasswordBearer
+from db import get_db_connection 
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+def verify_token(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, "your-secret-key", algorithms=["HS256"])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+```
+
+9. fix another error
+```
+# Reinstall locally if needed
+pip install python-multipart
+
+# Freeze updated dependencies
+pip freeze > requirements.txt
+```
+
+10. redeploy to cloudrun to check functionality
+```
+# save to Docker file
+gcloud builds submit --tag gcr.io/book-recommendations-456120/book-api
+
+# redeploy Cloud Run
+gcloud run deploy book-api \
+  --image gcr.io/book-recommendations-456120/book-api \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --port 8080
+
+```
+
+11. update index.html to fix search
+```
+function searchBooks() {
+    const query = document.getElementById('searchQuery').value;
+
+    const params = new URLSearchParams();
+    if (query) {
+        params.append('title', query);
+        params.append('authors', query);
+        params.append('description', query);
+        params.append('grade', query);
+    }
+
+    fetch(`/books?${params.toString()}`)
+        .then(res => res.json())
+        .then(books => {
+            const resultsDiv = document.getElementById('searchResults');
+            resultsDiv.innerHTML = '';
+            books.forEach(book => {
+                const div = document.createElement('div');
+                div.className = 'book';
+                div.innerHTML = `
+                    <img src="${book.image_small || ''}" alt="cover">
+                    <div>
+                        <strong>${book.title}</strong><br>
+                        <em>${book.authors}</em><br>
+                        <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'like')">👍</button>
+                        <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'dislike')">👎</button><br>
+                        ${book.buy_link ? `<a href="${book.buy_link}" target="_blank">Buy</a>` : ''}
+                    </div>
+                `;
+                resultsDiv.appendChild(div);
+            });
+        })
+        .catch(error => {
+            console.error('Search failed:', error);
+        });
+}
+
+
+```
+12. Currently doing some de-bugging of front end. need to post updated files
