@@ -47,7 +47,6 @@ def fetch_books(query, grade, max_results=40):
         description = info.get("description", "")
         page_count = info.get("pageCount", "")
         categories = ", ".join(info.get("categories", []))
-        maturity_rating = info.get("maturityRating", "")
         language = info.get("language", "")
         reading_mode_text = info.get("readingModes", {}).get("text", "")
         reading_mode_image = info.get("readingModes", {}).get("image", "")
@@ -78,7 +77,7 @@ def fetch_books(query, grade, max_results=40):
             title, authors, publisher, published_date, description,
             isbn_10, isbn_13,
             reading_mode_text, reading_mode_image, page_count,
-            categories, maturity_rating,
+            categories,
             image_small, image_large,
             language, country,
             list_price_amount, list_price_currency,
@@ -163,7 +162,6 @@ CREATE TABLE books (
     reading_mode_image VARCHAR(50),
     page_count INTEGER,
     categories VARCHAR(500),
-    maturity_rating VARCHAR(50),
     image_small VARCHAR(255),
     image_large VARCHAR(255),
     language VARCHAR(50),
@@ -177,15 +175,10 @@ CREATE TABLE books (
 );
 ```
 
-6. verify table creation
-```
-\dt
-```
-
 7.  import data from bucket to sql
 ```
-gcloud sql import csv your-instance-name gs://your-bucket-name/k8_books_40.csv \
-  --database=your-database-name \
+gcloud sql import csv book-recommendations-456120:us-central1:book-recs-db gs://k8-books-bucket/k8_books_40.csv \
+  --database=book_recommendations_db \
   --table=books
 ```
 
@@ -199,12 +192,12 @@ sudo chown $USER /cloudsql
 ```
 ./cloud-sql-proxy \
   --unix-socket /cloudsql \
-  [PROJECT_ID]:[REGION}:[INSTANCE-NAME]
+  book-recommendations-456120:us-central1:book-recs-db
 ```
 
 10. reconnect to database (may new tab or terminal)
 ```
-psql -h /cloudsql/[PROJECT_ID]:[REGION}:[INSTANCE-NAME] \
+psql -h /cloudsql/book-recommendations-456120:us-central1:book-recs-db \
      -U postgres -d book_recommendations_db
 ```
 
@@ -227,7 +220,7 @@ python3 -m venv venv
 source venv/bin/activate
 ```
 
-4. install dependencies
+4. install dependencies in shell
 ```
 pip install flask psycopg2-binary flask_sqlalchemy python-dotenv fastapi uvicorn
 ```
@@ -235,7 +228,7 @@ pip install flask psycopg2-binary flask_sqlalchemy python-dotenv fastapi uvicorn
 5. create a .env file for your db (if this doesn't connect correctly, add to app.py code)
 ```
 DB_USER=postgres
-DB_PASSWORD=your_db_password (this is the password from when you made your private connection on your instance)
+DB_PASSWORD=stimac-cis655-final
 DB_NAME=book_recommendations_db
 DB_HOST=127.0.0.1
 ```
@@ -247,6 +240,7 @@ echo $DB_USER
 echo $DB_PASSWORD
 echo $DB_HOST
 ```
+
 ## `books` and app.py
 7. click "Editor" button, navigate to books-api and create a new file named app.py
 ```
@@ -264,7 +258,6 @@ DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
 
-# Removed maturity_rating
 class Book(BaseModel):
     title: Optional[str]
     authors: Optional[str]
@@ -324,12 +317,7 @@ def get_books():
 
 8. *run the cloud sql proxy, it should return "Listening on...". If you see this, keep this open and open another tab. You will do this anytime you want to connect the session.*
 ```
-./cloud-sql-proxy [PROJECT-ID]:[REGION]:[INSTANCE-ID]
-```
-
-9. in the new tab, test your conneciton
-```
-psql -h /cloudsql/[PROJECT-ID]:[REGION]:[INSTANCE-ID] -U postgres -d book_recommendations_db
+./cloud-sql-proxy book-recommendations-456120:us-central1:book-recs-db
 ```
 
 10. *ensure that you are in the right directory and activate the virtual environment (do this every new session)*
@@ -3435,4 +3423,144 @@ gcloud run deploy book-api \
 ```
 4. YAY it works now
 
-5. 
+5. update thumbs up
+```
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+
+ALTER TABLE books
+ADD COLUMN IF NOT EXISTS thumbs_up INTEGER DEFAULT 0,
+ADD COLUMN IF NOT EXISTS thumbs_down INTEGER DEFAULT 0,
+ADD COLUMN IF NOT EXISTS avg_rating FLOAT;
+```
+
+6. add avg_rating to table: Open the BigQuery Console >> book-recommendations-456120 >> book_recs >> book_embeddings >> click "Edit schema" >> "Add field" >> Name: avg_rating Type: FLOAT Mode: NULLABLE >> Save.
+
+7. create avg_rating data in colab: https://colab.research.google.com/drive/1xU3Ccc4pD0RzjutHEIZYyJdMI5q3IRkh?usp=sharing 
+
+8. update index.html getMetadataRecommendations() function
+```
+div.innerHTML = `
+  <img src="${book.image_small || '/static/placeholder.png'}" alt="cover">
+  <div>
+    <strong>${book.title}</strong><br>
+    <em>${book.authors}</em><br>
+    👍 ${book.thumbs_up || 0} 👎 ${book.thumbs_down || 0} ⭐ ${book.avg_rating?.toFixed(1) || "N/A"}<br>
+    <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'like')">👍</button>
+    <button onclick="rateBook('${book.isbn_10}', '${book.title}', '${book.authors}', 'dislike')">👎</button><br>
+    ${book.web_reader_link ? `<a href="${book.web_reader_link}" target="_blank">Read</a>` : ''}
+  </div>
+`;
+```
+
+9. redeploy
+```
+docker build -t gcr.io/book-recommendations-456120/book-api .
+docker push gcr.io/book-recommendations-456120/book-api
+
+gcloud run deploy book-api \
+  --image gcr.io/book-recommendations-456120/book-api \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --add-cloudsql-instances book-recommendations-456120:us-central1:book-recs-db \
+  --set-env-vars DB_NAME=book_recommendations_db,DB_USER=postgres,DB_PASSWORD=stimac-cis655-final,INSTANCE_CONNECTION_NAME=book-recommendations-456120:us-central1:book-recs-db \
+  --port 8080
+```
+
+10. fix clean_books_csv.py
+
+11. fix fetch_books_dag.py
+
+12. push to Composer
+```
+gsutil cp fetch_books_dag.py gs://us-central1-book-data-pipel-122da488-bucket/dags
+```
+
+13. create file to append book files to table append_books_from_gcs.py
+```
+import os
+import csv
+import psycopg2
+from google.cloud import storage
+
+DB_NAME = os.environ['DB_NAME']
+DB_USER = os.environ['DB_USER']
+DB_PASSWORD = os.environ['DB_PASSWORD']
+DB_HOST = '/cloudsql/' + os.environ['INSTANCE_CONNECTION_NAME']
+
+BUCKET_NAME = 'k8-books-bucket'
+FILE_NAME = 'k8_books_clean.csv'
+
+def append_books(request):
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(BUCKET_NAME)
+    blob = bucket.blob(FILE_NAME)
+    blob.download_to_filename('/tmp/books.csv')
+
+    conn = psycopg2.connect(
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST
+    )
+    cur = conn.cursor()
+
+    with open('/tmp/books.csv', 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        new_count = 0
+        for row in reader:
+            # Check if book already exists
+            cur.execute("""
+                SELECT 1 FROM books WHERE isbn_10 = %s OR isbn_13 = %s OR LOWER(title) = LOWER(%s)
+            """, (row['isbn_10'], row['isbn_13'], row['title']))
+            exists = cur.fetchone()
+
+            if not exists:
+                cur.execute("""
+                    INSERT INTO books (
+                        title, authors, publisher, published_date, description,
+                        isbn_10, isbn_13, reading_mode_text, reading_mode_image,
+                        page_count, categories, image_small, image_large, language,
+                        sale_country, list_price_amount, list_price_currency,
+                        buy_link, web_reader_link, embeddable, grade
+                    ) VALUES (
+                        %(title)s, %(authors)s, %(publisher)s, %(published_date)s, %(description)s,
+                        %(isbn_10)s, %(isbn_13)s, %(reading_mode_text)s, %(reading_mode_image)s,
+                        %(page_count)s, %(categories)s, %(image_small)s, %(image_large)s, %(language)s,
+                        %(sale_country)s, %(list_price_amount)s, %(list_price_currency)s,
+                        %(buy_link)s, %(web_reader_link)s, %(embeddable)s, %(grade)s
+                    )
+                """, row)
+                new_count += 1
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return f"{new_count} new books added."
+```
+
+14. create main.py in book-api
+```
+from append_books_from_gcs import append_books
+```
+
+15. deploy
+```
+gcloud functions deploy append_books \
+  --runtime python311 \
+  --trigger-http \
+  --allow-unauthenticated \
+  --set-env-vars DB_NAME=book_recommendations_db,DB_USER=postgres,DB_PASSWORD=your_password,INSTANCE_CONNECTION_NAME=book-recommendations-456120:us-central1:book-recs-db \
+  --entry-point append_books \
+  --source .
+
+```
+
+16. get function url
+```
+gcloud functions describe append_books --gen2 --region=us-central1 --format="value(serviceConfig.uri)"
+# example: https://append-books-uyxqxqnvtq-uc.a.run.app
+```
+
+17. 
