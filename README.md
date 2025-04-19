@@ -228,7 +228,7 @@ pip install flask psycopg2-binary flask_sqlalchemy python-dotenv fastapi uvicorn
 5. create a .env file for your db (if this doesn't connect correctly, add to app.py code)
 ```
 DB_USER=postgres
-DB_PASSWORD=stimac-cis655-final
+DB_PASSWORD=pass
 DB_NAME=book_recommendations_db
 DB_HOST=127.0.0.1
 ```
@@ -380,7 +380,7 @@ def get_db_connection(): # i entered mine cause it wasn't connecting, but can al
     conn = psycopg2.connect(
         dbname="book_recommendations_db",
         user="postgres",
-        password="stimac-cis655-final",
+        password="pass",
         host="127.0.0.1",
         port="5432"
     )
@@ -565,7 +565,7 @@ uvicorn app:app --host=0.0.0.0 --port=8080 --reload
 
 15. connect to database
 ```
-psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=pass"
 ```
 ## `user` and `user_books`
 16. create `user` and `user_books` table
@@ -816,7 +816,7 @@ uvicorn app:app --host=0.0.0.0 --port=8080 --reload
 # make sure ./cloud-sql-proxy book-recommendations-456120:us-central1:book-recs-db is still running in other tab
 
 # connect to the database
-psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=pass"
 ```
 
 20. update `user_books` (if needed)
@@ -997,7 +997,7 @@ uvicorn app:app --host=0.0.0.0 --port=8080 --reload
 
 22. return to the terminal and open your db again
 ```
-psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=pass"
 ```
 
 23. enable an extension to help with fuzzy matching, so that book titles and authors will match even if there are capitalization or minor spelling errors
@@ -1048,7 +1048,7 @@ uvicorn app:app --host=0.0.0.0 --port=8080 --reload
 
 26. update tables so that users can add books and ratings for books that arent already in the table. I did not include title and author in this update because we are keeping them as required.
 ```
-sql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+sql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=pass"
 
 ALTER TABLE books
     ALTER COLUMN published_date   DROP NOT NULL,
@@ -1174,7 +1174,7 @@ uvicorn app:app --host=0.0.0.0 --port=8080 --reload
 gsutil cp gs://k8-books-bucket/books.csv .
 
 # open the db
-psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=pass"
 
 # in the db, import the data from the new csv
 \copy books(
@@ -1346,7 +1346,7 @@ from google.cloud import storage
 import psycopg2
 
 DB_USER = "postgres"
-DB_PASS = "stimac-cis655-final"
+DB_PASS = "pass"
 DB_NAME = "book_recommendations_db"
 DB_HOST = "/cloudsql/book-recommendations-456120:us-central1:book-recs-db"
 
@@ -1547,7 +1547,7 @@ bq_client = bigquery.Client()
 conn = psycopg2.connect(
     dbname="book_recommendations_db",
     user="postgres",
-    password="stimac-cis655-final",
+    password="pass",
     host="127.0.0.1",
     port="5432"
 )
@@ -1781,7 +1781,7 @@ bq_client = bigquery.Client()
 conn = psycopg2.connect(
     dbname="book_recommendations_db",
     user="postgres",
-    password="stimac-cis655-final",
+    password="pass",
     host="127.0.0.1",
     port="5432"
 )
@@ -2524,7 +2524,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 5. update `user` table
 ```
-psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=pass"
 
 ALTER TABLE users
 ADD COLUMN password TEXT,
@@ -2754,7 +2754,7 @@ def get_db_connection():
     return psycopg2.connect(
         dbname="book_recommendations_db",
         user="postgres",
-        password="stimac-cis655-final",
+        password="pass",
         host="127.0.0.1",
         port="5432"
     )
@@ -3120,7 +3120,7 @@ import time
 import os
 from google.cloud import storage
 
-API_KEY = "AIzaSyAF9e-dplvn7hy3ObmK60XV-cpht4pMeeY"
+API_KEY = "key"
 GRADE_QUERIES = {
     "K": "kindergarten books",
     "1": "grade 1 books",
@@ -3418,14 +3418,14 @@ gcloud run deploy book-api \
   --region us-central1 \
   --allow-unauthenticated \
   --add-cloudsql-instances=book-recommendations-456120:us-central1:book-recs-db \
-  --set-env-vars DB_NAME=book_recommendations_db,DB_USER=postgres,DB_PASSWORD=stimac-cis655-final,INSTANCE_CONNECTION_NAME=book-recommendations-456120:us-central1:book-recs-db \
+  --set-env-vars DB_NAME=book_recommendations_db,DB_USER=postgres,DB_PASSWORD=pass,INSTANCE_CONNECTION_NAME=book-recommendations-456120:us-central1:book-recs-db \
   --port 8080
 ```
 4. YAY it works now
 
 5. update thumbs up
 ```
-psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=stimac-cis655-final"
+psql "host=127.0.0.1 dbname=book_recommendations_db user=postgres password=pass"
 
 ALTER TABLE books
 ADD COLUMN IF NOT EXISTS thumbs_up INTEGER DEFAULT 0,
@@ -3463,7 +3463,7 @@ gcloud run deploy book-api \
   --region us-central1 \
   --allow-unauthenticated \
   --add-cloudsql-instances book-recommendations-456120:us-central1:book-recs-db \
-  --set-env-vars DB_NAME=book_recommendations_db,DB_USER=postgres,DB_PASSWORD=stimac-cis655-final,INSTANCE_CONNECTION_NAME=book-recommendations-456120:us-central1:book-recs-db \
+  --set-env-vars DB_NAME=book_recommendations_db,DB_USER=postgres,DB_PASSWORD=pass,INSTANCE_CONNECTION_NAME=book-recommendations-456120:us-central1:book-recs-db \
   --port 8080
 ```
 
